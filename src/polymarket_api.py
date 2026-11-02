@@ -93,6 +93,25 @@ class PolymarketClientWrapper:
                 return json.loads(resp.read().decode("utf-8"))
         return None
 
+    def _sync_post_json(self, url: str, payload: Dict):
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "PolymarketCopyBot/2.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+        return None
+
+    async def _post_json(self, session, url: str, payload: Dict):
+        if session is not None and aiohttp is not None:
+            async with session.post(url, json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                return None
+        return await asyncio.to_thread(self._sync_post_json, url, payload)
+
     async def _get_json(self, session, url: str, params: Dict[str, str]):
         if session is not None and aiohttp is not None:
             async with session.get(url, params=params, proxy=self.proxy, timeout=10) as resp:
@@ -101,21 +120,74 @@ class PolymarketClientWrapper:
                 return None
         return await asyncio.to_thread(self._sync_get_json, url, params)
 
-    async def get_recent_leader_trades(self, session, proxy_address: str, limit: int = 10) -> List[Dict]:
+    async def get_leader_trades_since(self, session, proxy_address: str, since_timestamp: int) -> Tuple[List[Dict], bool]:
+        """
+        Devuelve las operaciones del líder desde 'since_timestamp' (segundos), de la más
+        reciente a la más antigua, recorriendo la Data API página a página.
+        El segundo valor es True si se alcanzó el tope de páginas antes de llegar a
+        'since_timestamp', es decir, si pueden faltar operaciones más antiguas.
+        """
         url = f"{self.cfg.data_api_host}/activity"
-        params = {"user": proxy_address.lower(), "type": "TRADE", "limit": str(limit)}
-        data = await self._get_json(session, url, params)
-        return data if isinstance(data, list) else []
+        page_size = max(1, self.cfg.activity_page_size)
+        trades: List[Dict] = []
+        for page in range(max(1, self.cfg.max_activity_pages)):
+            params = {
+                "user": proxy_address.lower(), "type": "TRADE",
+                "limit": str(page_size), "offset": str(page * page_size),
+            }
+            data = await self._get_json(session, url, params)
+            if not isinstance(data, list):
+                # Si falta una página no procesamos nada: procesar solo las recientes
+                # dejaría atrás para siempre las más antiguas. Se reintenta en el próximo ciclo.
+                raise RuntimeError(f"La Data API no devolvió la página {page + 1} de actividad del trader")
+            trades.extend(data)
+            if len(data) < page_size:
+                return trades, False
+            oldest = min(self._timestamp_seconds(t.get("timestamp", 0)) for t in data)
+            if oldest < since_timestamp:
+                return trades, False
+        return trades, True
 
-    async def get_leader_portfolio_value(self, session, proxy_address: str) -> float:
+    @staticmethod
+    def _timestamp_seconds(raw_ts) -> int:
+        ts = int(float(raw_ts or 0))
+        return ts // 1000 if ts > 1_000_000_000_000 else ts
+
+    async def get_leader_portfolio_value(self, session, proxy_address: str) -> Optional[float]:
+        """
+        Valor de las posiciones abiertas del líder (la Data API no incluye su efectivo).
+        Devuelve None si la API falla, para no confundir un error con una cartera vacía.
+        """
         url = f"{self.cfg.data_api_host}/value"
         params = {"user": proxy_address.lower()}
         data = await self._get_json(session, url, params)
-        if isinstance(data, list) and len(data) > 0:
-            return float(data[0].get("value", 0.0))
+        if isinstance(data, list):
+            return float(data[0].get("value", 0.0)) if data else 0.0
         elif isinstance(data, dict):
             return float(data.get("value", 0.0))
-        return 0.0
+        return None
+
+    async def get_leader_cash_balance(self, session, proxy_address: str) -> Optional[float]:
+        """
+        Efectivo (USDC) del líder en su wallet de Polymarket, leído en Polygon con
+        balanceOf(). Devuelve None si el RPC falla.
+        """
+        if not self.cfg.polygon_rpc_url:
+            return None
+        address = proxy_address.lower().replace("0x", "").rjust(64, "0")
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+            "params": [{"to": self.cfg.collateral_token_address, "data": "0x70a08231" + address}, "latest"],
+        }
+        for _ in range(2):
+            try:
+                data = await self._post_json(session, self.cfg.polygon_rpc_url, payload)
+            except Exception:
+                data = None
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, str) and result.startswith("0x"):
+                return int(result, 16) / 10 ** self.cfg.collateral_decimals
+        return None
 
     async def get_leader_token_balance(self, session, proxy_address: str, token_id: str) -> float:
         url = f"{self.cfg.data_api_host}/positions"

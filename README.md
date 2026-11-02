@@ -40,11 +40,14 @@ No necesitas abrir una terminal para agregar o modificar tus seguimientos. Abre 
 En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions**:
 1. En la pestaña **Variables**, puedes crear:
    * `DRY_RUN`: Pon `true` para modo simulación (Paper Trading) o `false` para dinero real.
+   * `MAX_TRADE_AGE_MINUTES` (opcional, por defecto `60`): las compras del líder más antiguas que esto no se copian, porque el precio ya no es el que él pagó. Las ventas de posiciones que tienes sí se ejecutan.
+   * `MAX_ACTIVITY_PAGES` (opcional, por defecto `10`): cuántas páginas de 100 operaciones se leen por trader en cada ciclo.
 2. En la pestaña **Secrets**, agrega tus llaves (nunca las escribas en el código):
    * `POLYMARKET_PRIVATE_KEY`
    * `POLYMARKET_PROXY_ADDRESS`
    * `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE`
    * `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (opcional para recibir alertas en tu celular).
+   * `POLYGON_RPC_URL` (muy recomendable): un RPC de Polygon fiable (Alchemy, Infura, QuickNode…). El bot lo usa para leer el efectivo de cada líder y calcular qué parte de su capital apuesta. Si no puede leerlo, **no copia la compra**. Sin este secret usa `https://polygon-rpc.com`, que es público y a veces falla.
    * `HTTP_PROXY_URL` (obligatorio cuando pases a `DRY_RUN=false` en GitHub Actions, ya que los servidores de GitHub están en EE.UU. y Polymarket bloquea el envío de órdenes desde IPs estadounidenses). Sin él, el bot se niega a enviar órdenes reales desde GitHub Actions.
 
 ### Paso 4: Ejecutar en GitHub Actions o GitHub Codespaces

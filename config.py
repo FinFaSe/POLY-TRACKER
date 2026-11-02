@@ -16,6 +16,11 @@ class BotConfig:
     poll_interval: int = int(os.getenv("POLL_INTERVAL_SECONDS", "4"))
     # Cada cuánto se revisa si los mercados con posiciones abiertas ya se resolvieron.
     resolution_check_interval: int = int(os.getenv("RESOLUTION_CHECK_INTERVAL_SECONDS", "300"))
+    # Lectura de la actividad del líder por páginas (hasta activity_page_size * max_activity_pages operaciones).
+    activity_page_size: int = int(os.getenv("ACTIVITY_PAGE_SIZE") or "100")
+    max_activity_pages: int = int(os.getenv("MAX_ACTIVITY_PAGES") or "10")
+    # Operaciones del líder más antiguas que esto no se copian (el precio ya no es el suyo).
+    max_trade_age_minutes: int = int(os.getenv("MAX_TRADE_AGE_MINUTES") or "60")
 
     private_key: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     proxy_address: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
@@ -23,7 +28,12 @@ class BotConfig:
     clob_secret: str = os.getenv("CLOB_SECRET", "")
     clob_passphrase: str = os.getenv("CLOB_PASSPHRASE", "")
 
-    polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    # 'or' y no solo el valor por defecto de getenv: GitHub Actions pasa los secrets no
+    # configurados como cadena vacía.
+    polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL") or "https://polygon-rpc.com"
+    # Token con el que opera Polymarket (USDC.e en Polygon) para leer el efectivo de cada líder.
+    collateral_token_address: str = os.getenv("COLLATERAL_TOKEN_ADDRESS") or "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    collateral_decimals: int = int(os.getenv("COLLATERAL_DECIMALS") or "6")
     http_proxy_url: str = os.getenv("HTTP_PROXY_URL", "").strip()
 
     db_path: str = os.getenv("DB_PATH", "state/copybot.db")

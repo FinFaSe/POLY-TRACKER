@@ -51,7 +51,26 @@ class CopyBotMonitor:
             total_val += pos["shares"] * price
         return total_val
 
-    async def process_leader_trade(self, session, trader: Dict, trade_event: Dict):
+    async def get_leader_total_equity(self, session, proxy_address: str) -> Optional[float]:
+        """
+        Patrimonio total del líder: valor de sus posiciones + su efectivo en USDC.
+        La Data API (/value) solo da las posiciones; sin el efectivo, un líder con mucha
+        liquidez parecería apostar una parte mucho mayor de su capital.
+        Devuelve None si falta cualquiera de los dos datos.
+        """
+        positions_value = await self.api.get_leader_portfolio_value(session, proxy_address)
+        if positions_value is None:
+            return None
+        cash = await self.api.get_leader_cash_balance(session, proxy_address)
+        if cash is None:
+            return None
+        return positions_value + cash
+
+    async def process_leader_trade(self, session, trader: Dict, trade_event: Dict) -> str:
+        """
+        Procesa una operación del líder. Devuelve "stale" si se descartó por antigua,
+        "ignored" si ya estaba vista o no es válida, y "processed" en otro caso.
+        """
         tx_hash = trade_event.get("transactionHash", "")
         token_id = str(trade_event.get("asset", ""))
         side = str(trade_event.get("side", "")).upper()
@@ -59,11 +78,11 @@ class CopyBotMonitor:
 
         last_seen = int(trader.get("last_seen_timestamp", 0))
         if trade_timestamp < last_seen:
-            return
+            return "ignored"
 
         trade_id = f"{tx_hash}_{token_id}_{side}_{trade_timestamp}"
         if not token_id or side not in ("BUY", "SELL") or self.db.is_trade_processed(trade_id):
-            return
+            return "ignored"
 
         leader_shares = float(trade_event.get("size", 0.0))
         leader_price = float(trade_event.get("price", 0.0))
@@ -71,6 +90,29 @@ class CopyBotMonitor:
         market_title = trade_event.get("title", "Mercado Polymarket")
         outcome = trade_event.get("outcome", "")
         condition_id = str(trade_event.get("conditionId", "") or "")
+
+        # Comprar al precio de ahora lo que el líder compró hace horas no es copiarle. Pasa al
+        # reactivar un trader o el workflow tras una pausa, o si GitHub Actions se retrasa.
+        # Una venta antigua sí se ejecuta si tenemos la posición: el líder ya salió del mercado.
+        max_age_seconds = self.cfg.max_trade_age_minutes * 60
+        is_stale = max_age_seconds > 0 and trade_timestamp < time.time() - max_age_seconds
+        holds_position = side == "SELL" and bool(
+            (self.db.get_sub_position(trader["proxy_address"], token_id) or {}).get("shares", 0) > 0.0001
+        )
+        if is_stale and not holds_position:
+            reason = f"Operación con más de {self.cfg.max_trade_age_minutes} min de antigüedad"
+            if side == "BUY":
+                self.db.record_buy_execution(
+                    trade_id, trader["proxy_address"], token_id, market_title, outcome,
+                    leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_STALE", reason
+                )
+            else:
+                self.db.record_sell_execution(
+                    trade_id, trader["proxy_address"], token_id,
+                    leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_STALE", reason
+                )
+            self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
+            return "stale"
 
         await self.notifier.notify(
             f"Movimiento detectado de {trader['alias']}: {side} ${leader_usdc:.2f} USDC en '{market_title}' ({outcome}) a ${leader_price:.3f}",
@@ -85,7 +127,7 @@ class CopyBotMonitor:
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"Operación descartada ({trader['alias']}): Sin liquidez en el libro de órdenes.", "WARNING")
-            return
+            return "processed"
 
         slippage_ok, slippage_pct = self.api.check_slippage(leader_price, market_price, side)
         if not slippage_ok:
@@ -103,10 +145,19 @@ class CopyBotMonitor:
                 )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"Operación descartada ({trader['alias']}): {reason}", "WARNING")
-            return
+            return "processed"
 
         if side == "BUY":
-            leader_equity = await self.api.get_leader_portfolio_value(session, trader["proxy_address"])
+            leader_equity = await self.get_leader_total_equity(session, trader["proxy_address"])
+            if leader_equity is None:
+                reason = "No se pudo leer el patrimonio del líder (posiciones + efectivo); revisa POLYGON_RPC_URL"
+                self.db.record_buy_execution(
+                    trade_id, trader["proxy_address"], token_id, market_title, outcome,
+                    leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_EQUITY", reason
+                )
+                self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
+                await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "WARNING")
+                return "processed"
             subbank_pos_val = await self.estimate_subbank_positions_value(session, trader["proxy_address"])
             decision = self.sizer.evaluate_buy(trader, leader_usdc, leader_equity, subbank_pos_val)
 
@@ -117,7 +168,7 @@ class CopyBotMonitor:
                 )
                 self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
                 await self.notifier.notify(f"Compra omitida ({trader['alias']}): {decision.reason}", "WARNING")
-                return
+                return "processed"
 
             success, exec_msg = await self.api.execute_order(
                 token_id=token_id, side="BUY", price=market_price, usdc_amount=decision.usdc_amount
@@ -142,7 +193,7 @@ class CopyBotMonitor:
                 )
                 self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
                 await self.notifier.notify(f"Venta omitida ({trader['alias']}): {decision.reason}", "WARNING")
-                return
+                return "processed"
 
             success, exec_msg = await self.api.execute_order(
                 token_id=token_id, side="SELL", price=market_price, shares=decision.shares_to_sell
@@ -154,6 +205,8 @@ class CopyBotMonitor:
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"{decision.reason} | {exec_msg}", "SUCCESS" if success else "ERROR")
+
+        return "processed"
 
     async def settle_resolved_positions(self, session):
         """
@@ -215,9 +268,27 @@ class CopyBotMonitor:
 
         for trader in active_traders:
             try:
-                recent_trades = await self.api.get_recent_leader_trades(session, trader["proxy_address"], limit=10)
-                for trade_event in reversed(recent_trades):
-                    await self.process_leader_trade(session, trader, trade_event)
+                # Todas las operaciones desde la última vista, no solo las 10 últimas.
+                since = int(trader.get("last_seen_timestamp", 0))
+                trades, truncated = await self.api.get_leader_trades_since(session, trader["proxy_address"], since)
+                if truncated:
+                    await self.notifier.notify(
+                        f"{trader['alias']} hizo más de {len(trades)} operaciones desde la última revisión: "
+                        "solo se procesan las más recientes (sube MAX_ACTIVITY_PAGES si pasa a menudo).",
+                        "WARNING"
+                    )
+
+                trades.sort(key=lambda t: self.normalize_timestamp(t.get("timestamp", 0)))
+                stale = 0
+                for trade_event in trades:
+                    if await self.process_leader_trade(session, trader, trade_event) == "stale":
+                        stale += 1
+                if stale:
+                    await self.notifier.notify(
+                        f"Se omitieron {stale} operaciones de {trader['alias']} con más de "
+                        f"{self.cfg.max_trade_age_minutes} min de antigüedad.",
+                        "WARNING"
+                    )
             except Exception as e:
                 await self.notifier.notify(f"Error monitoreando a {trader['alias']}: {e}", "ERROR")
 
