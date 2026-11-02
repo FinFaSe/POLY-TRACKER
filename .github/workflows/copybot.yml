@@ -1,0 +1,75 @@
+name: Polymarket CopyBot Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecución (once = 1 ciclo rápido, loop = correr durante X minutos)"
+        required: true
+        default: "once"
+        type: choice
+        options:
+          - once
+          - loop
+      duration_minutes:
+        description: "Minutos de ejecución continua (solo si elegiste 'loop')"
+        required: false
+        default: "10"
+
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  run-copybot:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: polymarket-copybot-state
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Sincronizar traders.json y ejecutar CopyBot
+        env:
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+          MAX_SLIPPAGE_PCT: ${{ vars.MAX_SLIPPAGE_PCT || '0.025' }}
+          MAX_POSITION_WEIGHT_PCT: ${{ vars.MAX_POSITION_WEIGHT_PCT || '0.25' }}
+          MIN_ORDER_USDC: ${{ vars.MIN_ORDER_USDC || '2.0' }}
+          POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
+          POLYMARKET_PROXY_ADDRESS: ${{ secrets.POLYMARKET_PROXY_ADDRESS }}
+          CLOB_API_KEY: ${{ secrets.CLOB_API_KEY }}
+          CLOB_SECRET: ${{ secrets.CLOB_SECRET }}
+          CLOB_PASSPHRASE: ${{ secrets.CLOB_PASSPHRASE }}
+          POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
+          HTTP_PROXY_URL: ${{ secrets.HTTP_PROXY_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "loop" ]; then
+            python main.py --max-runtime-minutes ${{ github.event.inputs.duration_minutes || '10' }}
+          else
+            python main.py --once
+          fi
+
+      - name: Mostrar resumen de Sub-Bancas en los logs de GitHub
+        run: python cli.py status
+
+      - name: Guardar estado de Sub-Bancas en el repositorio
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/
+          git diff --staged --quiet || (git commit -m "chore(state): actualizar estado de sub-bancas [skip ci]" && git push)
