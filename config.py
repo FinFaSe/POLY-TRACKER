@@ -14,6 +14,8 @@ class BotConfig:
     max_position_weight_pct: float = float(os.getenv("MAX_POSITION_WEIGHT_PCT", "0.25"))
     min_order_usdc: float = float(os.getenv("MIN_ORDER_USDC", "2.0"))
     poll_interval: int = int(os.getenv("POLL_INTERVAL_SECONDS", "4"))
+    # Cada cuánto se revisa si los mercados con posiciones abiertas ya se resolvieron.
+    resolution_check_interval: int = int(os.getenv("RESOLUTION_CHECK_INTERVAL_SECONDS", "300"))
 
     private_key: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     proxy_address: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")

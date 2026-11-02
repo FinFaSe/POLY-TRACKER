@@ -16,8 +16,10 @@ on:
         required: false
         default: "10"
 
-  schedule:
-    - cron: "*/5 * * * *"
+  # Ejecución automática desactivada temporalmente (solo se lanza a mano).
+  # Para reactivarla, descomenta estas dos líneas:
+  # schedule:
+  #   - cron: "*/5 * * * *"
 
 permissions:
   contents: write
@@ -67,9 +69,15 @@ jobs:
       - name: Mostrar resumen de Sub-Bancas en los logs de GitHub
         run: python cli.py status
 
+      # Se ejecuta aunque el bot falle a mitad de ciclo: las órdenes ya enviadas tienen
+      # que quedar registradas o la siguiente ejecución las repetiría.
       - name: Guardar estado de Sub-Bancas en el repositorio
+        if: always()
+        env:
+          STATE_BRANCH: ${{ github.ref_name }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/
-          git diff --staged --quiet || (git commit -m "chore(state): actualizar estado de sub-bancas [skip ci]" && git push)
+          bash scripts/save_state.sh

@@ -46,6 +46,7 @@ class DatabaseManager:
                     token_id TEXT NOT NULL,
                     market_title TEXT,
                     outcome TEXT,
+                    condition_id TEXT,
                     shares REAL NOT NULL DEFAULT 0.0,
                     avg_price REAL NOT NULL DEFAULT 0.0,
                     UNIQUE(trader_address, token_id),
@@ -68,6 +69,11 @@ class DatabaseManager:
                     timestamp TEXT NOT NULL
                 )
             """)
+
+            # Migración: bases de datos creadas antes de guardar el condition_id del mercado.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sub_positions)")}
+            if "condition_id" not in columns:
+                conn.execute("ALTER TABLE sub_positions ADD COLUMN condition_id TEXT")
             conn.commit()
 
     def sync_from_json(self, json_path: str = "traders.json"):
@@ -197,7 +203,8 @@ class DatabaseManager:
         copied_usdc: float,
         exec_price: float,
         status: str,
-        reason: str = ""
+        reason: str = "",
+        condition_id: str = ""
     ):
         trader_address = trader_address.lower()
         shares_bought = copied_usdc / exec_price if exec_price > 0 else 0.0
@@ -222,14 +229,14 @@ class DatabaseManager:
                     new_avg_price = (old_cost + copied_usdc) / new_shares if new_shares > 0 else exec_price
                     conn.execute("""
                         UPDATE sub_positions
-                        SET shares = ?, avg_price = ?
+                        SET shares = ?, avg_price = ?, condition_id = COALESCE(NULLIF(condition_id, ''), ?)
                         WHERE trader_address = ? AND token_id = ?
-                    """, (new_shares, new_avg_price, trader_address, token_id))
+                    """, (new_shares, new_avg_price, condition_id, trader_address, token_id))
                 else:
                     conn.execute("""
-                        INSERT INTO sub_positions (trader_address, token_id, market_title, outcome, shares, avg_price)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (trader_address, token_id, market_title, outcome, shares_bought, exec_price))
+                        INSERT INTO sub_positions (trader_address, token_id, market_title, outcome, condition_id, shares, avg_price)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (trader_address, token_id, market_title, outcome, condition_id, shares_bought, exec_price))
 
             conn.execute("""
                 INSERT OR IGNORE INTO processed_trades
@@ -273,3 +280,44 @@ class DatabaseManager:
                 VALUES (?, ?, 'SELL', ?, ?, ?, ?, ?, ?, ?, ?)
             """, (trade_id, trader_address, token_id, leader_usdc, leader_price, proceeds_usdc, exec_price, status, reason, now_iso))
             conn.commit()
+
+    def settle_resolved_position(self, trader_address: str, token_id: str, payout_per_share: float) -> float:
+        """
+        Cierra la posición de una sub-banca en un mercado ya resuelto: abona
+        shares * pago (1.0 si ganó, 0.0 si perdió) al efectivo disponible y deja la
+        posición en cero. Devuelve el USDC abonado.
+        """
+        trader_address = trader_address.lower()
+        now = datetime.now(timezone.utc)
+        with self._get_conn() as conn:
+            pos = conn.execute("""
+                SELECT shares FROM sub_positions
+                WHERE trader_address = ? AND token_id = ?
+            """, (trader_address, token_id)).fetchone()
+            if not pos or pos["shares"] <= 0.0001:
+                return 0.0
+
+            shares = pos["shares"]
+            payout_usdc = shares * payout_per_share
+            conn.execute("""
+                UPDATE tracked_traders
+                SET available_cash = available_cash + ?
+                WHERE proxy_address = ?
+            """, (payout_usdc, trader_address))
+            conn.execute("""
+                UPDATE sub_positions SET shares = 0.0
+                WHERE trader_address = ? AND token_id = ?
+            """, (trader_address, token_id))
+
+            status = "RESOLVED_WON" if payout_per_share > 0 else "RESOLVED_LOST"
+            conn.execute("""
+                INSERT OR IGNORE INTO processed_trades
+                (trade_id, trader_address, side, token_id, leader_usdc, leader_price, copied_usdc, execution_price, status, reason, timestamp)
+                VALUES (?, ?, 'RESOLVE', ?, 0.0, 0.0, ?, ?, ?, ?, ?)
+            """, (
+                f"resolve_{trader_address}_{token_id}_{int(now.timestamp())}",
+                trader_address, token_id, payout_usdc, payout_per_share, status,
+                f"Mercado resuelto: {shares:.4f} shares a ${payout_per_share:.2f}", now.isoformat()
+            ))
+            conn.commit()
+            return payout_usdc
