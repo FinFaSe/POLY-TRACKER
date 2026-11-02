@@ -16,8 +16,10 @@ on:
         required: false
         default: "10"
 
-  schedule:
-    - cron: "*/5 * * * *"
+  # Ejecución automática desactivada temporalmente (solo se lanza a mano).
+  # Para reactivarla, descomenta estas dos líneas:
+  # schedule:
+  #   - cron: "*/5 * * * *"
 
 permissions:
   contents: write
