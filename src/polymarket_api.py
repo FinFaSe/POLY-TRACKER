@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
@@ -20,11 +21,43 @@ class PolymarketClientWrapper:
         self.cfg = cfg
         self.proxy = cfg.http_proxy_url if cfg.http_proxy_url else None
         self.clob_client = None
+        self.clob_init_error = ""
         if not self.cfg.dry_run and self.cfg.private_key:
             self._init_clob_client()
 
-    def _init_clob_client(self):
+    @staticmethod
+    def configure_clob_http_proxy(proxy_url: str):
+        """
+        py-clob-client envía las órdenes con un cliente httpx propio, creado al importar
+        la librería, que no usa HTTP_PROXY_URL. Lo sustituimos por uno que pase por el
+        proxy para que las órdenes no salgan desde una IP bloqueada (p. ej. GitHub Actions en EE.UU.).
+        """
+        import httpx
+        from py_clob_client.http_helpers import helpers
+
+        if not hasattr(helpers, "_http_client"):
+            raise RuntimeError(
+                "Esta versión de py-clob-client no expone '_http_client'; no se puede aplicar el proxy a las órdenes"
+            )
+        old_client = helpers._http_client
+        helpers._http_client = httpx.Client(http2=True, proxy=proxy_url)
         try:
+            old_client.close()
+        except Exception:
+            pass
+
+    def _init_clob_client(self):
+        if os.getenv("GITHUB_ACTIONS") == "true" and not self.proxy:
+            self.clob_init_error = (
+                "Modo real bloqueado: en GitHub Actions hace falta HTTP_PROXY_URL, porque Polymarket "
+                "rechaza órdenes desde IPs de EE.UU."
+            )
+            print(f"[ERROR] {self.clob_init_error}")
+            return
+        try:
+            if self.proxy:
+                self.configure_clob_http_proxy(self.proxy)
+
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
 
@@ -42,7 +75,8 @@ class PolymarketClientWrapper:
                 funder=self.cfg.proxy_address
             )
         except Exception as e:
-            print(f"[ERROR] No se pudo inicializar py-clob-client: {e}")
+            self.clob_init_error = f"No se pudo inicializar py-clob-client: {e}"
+            print(f"[ERROR] {self.clob_init_error}")
             self.clob_client = None
 
     def _sync_get_json(self, url: str, params: Dict[str, str]):
@@ -109,6 +143,22 @@ class PolymarketClientWrapper:
             bids = book.get("bids", [])
             return max(float(b["price"]) for b in bids) if bids else None
 
+    async def get_market_resolution(self, session, condition_id: str) -> Optional[Dict[str, float]]:
+        """
+        Devuelve {token_id: pago_por_share} si el mercado ya está resuelto
+        (1.0 para el resultado ganador, 0.0 para los demás), o None si sigue abierto
+        o aún no tiene ganador.
+        """
+        if not condition_id:
+            return None
+        market = await self._get_json(session, f"{self.cfg.clob_host}/markets/{condition_id}", {})
+        if not isinstance(market, dict) or not market.get("closed"):
+            return None
+        tokens = market.get("tokens") or []
+        if not any(t.get("winner") for t in tokens):
+            return None
+        return {str(t.get("token_id")): (1.0 if t.get("winner") else 0.0) for t in tokens}
+
     def check_slippage(self, leader_price: float, current_market_price: float, side: str) -> Tuple[bool, float]:
         if leader_price <= 0:
             return False, 0.0
@@ -133,7 +183,7 @@ class PolymarketClientWrapper:
             return True, f"[SIMULACIÓN DRY_RUN] Orden {side} ejecutada por {qty_info} a ${price:.4f}"
 
         if not self.clob_client:
-            return False, "Cliente CLOB no inicializado (revisa tus Secrets en GitHub o .env)"
+            return False, self.clob_init_error or "Cliente CLOB no inicializado (revisa tus Secrets en GitHub o .env)"
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType

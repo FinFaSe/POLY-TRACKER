@@ -31,6 +31,8 @@ class CopyBotMonitor:
             max_position_weight_pct=cfg.max_position_weight_pct
         )
         self.notifier = Notifier(cfg)
+        self._last_resolution_check = 0.0
+        self._warned_missing_condition = set()
 
     @staticmethod
     def normalize_timestamp(raw_ts) -> int:
@@ -68,9 +70,10 @@ class CopyBotMonitor:
         leader_usdc = float(trade_event.get("usdcSize", leader_shares * leader_price))
         market_title = trade_event.get("title", "Mercado Polymarket")
         outcome = trade_event.get("outcome", "")
+        condition_id = str(trade_event.get("conditionId", "") or "")
 
         await self.notifier.notify(
-            f"Movimiento detectado de *{trader['alias']}*: {side} ${leader_usdc:.2f} USDC en '{market_title}' ({outcome}) a ${leader_price:.3f}",
+            f"Movimiento detectado de {trader['alias']}: {side} ${leader_usdc:.2f} USDC en '{market_title}' ({outcome}) a ${leader_price:.3f}",
             "INFO"
         )
 
@@ -122,7 +125,8 @@ class CopyBotMonitor:
             status = ("SIMULATED" if self.cfg.dry_run else "EXECUTED") if success else "FAILED"
             self.db.record_buy_execution(
                 trade_id, trader["proxy_address"], token_id, market_title, outcome,
-                leader_usdc, leader_price, decision.usdc_amount, market_price, status, exec_msg
+                leader_usdc, leader_price, decision.usdc_amount, market_price, status, exec_msg,
+                condition_id=condition_id
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"{decision.reason} | {exec_msg}", "SUCCESS" if success else "ERROR")
@@ -151,10 +155,62 @@ class CopyBotMonitor:
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"{decision.reason} | {exec_msg}", "SUCCESS" if success else "ERROR")
 
+    async def settle_resolved_positions(self, session):
+        """
+        Cierra las posiciones de mercados ya resueltos. El trader líder cobra al
+        resolverse el mercado sin vender, así que el bot nunca vería una venta que copiar.
+        Incluye traders pausados: sus posiciones también se resuelven.
+        """
+        for trader in self.db.get_all_traders():
+            for pos in self.db.get_trader_positions(trader["proxy_address"]):
+                token_id = pos["token_id"]
+                condition_id = pos.get("condition_id") or ""
+                if not condition_id:
+                    if token_id not in self._warned_missing_condition:
+                        self._warned_missing_condition.add(token_id)
+                        await self.notifier.notify(
+                            f"Posición de {trader['alias']} en '{pos.get('market_title')}' sin condition_id: "
+                            "no se puede comprobar si el mercado se resolvió.",
+                            "WARNING", send_telegram=False
+                        )
+                    continue
+                try:
+                    payouts = await self.api.get_market_resolution(session, condition_id)
+                except Exception as e:
+                    await self.notifier.notify(
+                        f"No se pudo comprobar la resolución de '{pos.get('market_title')}': {e}",
+                        "WARNING", send_telegram=False
+                    )
+                    continue
+                if payouts is None or token_id not in payouts:
+                    continue
+
+                payout = payouts[token_id]
+                credited = self.db.settle_resolved_position(trader["proxy_address"], token_id, payout)
+                market = f"'{pos.get('market_title') or 'Mercado Polymarket'}' ({pos.get('outcome') or ''})"
+                if payout > 0:
+                    msg = f"Mercado resuelto a favor ({trader['alias']}): {market}. Se abonan ${credited:.2f} USDC a la sub-banca."
+                    if not self.cfg.dry_run:
+                        msg += " El bot no cobra en la blockchain: reclama las ganancias en polymarket.com (botón Claim)."
+                    await self.notifier.notify(msg, "SUCCESS")
+                else:
+                    await self.notifier.notify(
+                        f"Mercado resuelto en contra ({trader['alias']}): {market}. La posición se cierra en $0.",
+                        "WARNING"
+                    )
+
     async def scan_once(self, session):
+        now = time.time()
+        if now - self._last_resolution_check >= self.cfg.resolution_check_interval:
+            self._last_resolution_check = now
+            await self.settle_resolved_positions(session)
+
         active_traders = self.db.get_active_traders()
         if not active_traders:
-            await self.notifier.notify("No hay traders activos configurados (revisa traders.json o usa cli.py).", "WARNING")
+            await self.notifier.notify(
+                "No hay traders activos configurados (revisa traders.json o usa cli.py).",
+                "WARNING", send_telegram=False
+            )
             return
 
         for trader in active_traders:
@@ -168,7 +224,12 @@ class CopyBotMonitor:
     async def run(self, once: bool = False, max_runtime_minutes: Optional[int] = None):
         mode_str = "SIMULACIÓN (Paper Trading)" if self.cfg.dry_run else "PRODUCCIÓN (Dinero Real)"
         exec_type = "Ciclo Único (--once)" if once else "Monitoreo Continuo"
-        await self.notifier.notify(f"Iniciando Polymarket CopyBot | Modo: {mode_str} | Ejecución: {exec_type}", "INFO")
+        # En GitHub Actions (--once) el bot arranca cada pocos minutos: el aviso de arranque
+        # solo va a la consola para no llenar Telegram.
+        await self.notifier.notify(
+            f"Iniciando Polymarket CopyBot | Modo: {mode_str} | Ejecución: {exec_type}",
+            "INFO", send_telegram=not once
+        )
 
         start_time = time.time()
         async with AsyncExitStack() as stack:

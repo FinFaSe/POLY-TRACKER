@@ -45,10 +45,14 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
    * `POLYMARKET_PROXY_ADDRESS`
    * `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE`
    * `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (opcional para recibir alertas en tu celular).
-   * `HTTP_PROXY_URL` (importante cuando pases a `DRY_RUN=false` en GitHub Actions, ya que los servidores de GitHub están en EE.UU. y Polymarket bloquea el envío de órdenes desde IPs estadounidenses).
+   * `HTTP_PROXY_URL` (obligatorio cuando pases a `DRY_RUN=false` en GitHub Actions, ya que los servidores de GitHub están en EE.UU. y Polymarket bloquea el envío de órdenes desde IPs estadounidenses). Sin él, el bot se niega a enviar órdenes reales desde GitHub Actions.
 
 ### Paso 4: Ejecutar en GitHub Actions o GitHub Codespaces
 * **Opción A — GitHub Actions (Automático y gratuito):**
   Ve a la pestaña **Actions** de tu repositorio, selecciona **Polymarket CopyBot Runner** y haz clic en **Run workflow**. El bot escaneará los movimientos, actualizará la base de datos en `state/copybot.db` y guardará automáticamente el estado de cada `bank` en tu repositorio.
+  Si el estado no se puede guardar (por ejemplo, porque editaste el repositorio mientras corría), el bot reintenta varias veces. Si aun así falla, te avisa por Telegram y el workflow termina en rojo: desactívalo antes de la siguiente ejecución, porque podría repetir órdenes ya enviadas.
 * **Opción B — GitHub Codespaces (En tiempo real cada 4 segundos):**
   En la página principal de tu repositorio, haz clic en el botón verde **<> Code -> pestaña Codespaces -> Create codespace on main**. Se abrirá un entorno en la nube preconfigurado donde puedes correr `python main.py` de forma continua.
+
+### Mercados resueltos
+Cuando un mercado se resuelve, el bot cierra la posición de la sub-banca automáticamente: abona $1 por share si ganó y $0 si perdió, y te avisa por Telegram. En modo real (`DRY_RUN=false`) el bot **no cobra las ganancias en la blockchain**: entra en polymarket.com y pulsa **Claim** en los mercados ganadores. La frecuencia de esta revisión se ajusta con `RESOLUTION_CHECK_INTERVAL_SECONDS` (por defecto, 300).
