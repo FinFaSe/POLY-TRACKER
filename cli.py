@@ -1,5 +1,7 @@
 import argparse
+import sys
 from config import config
+from src import traders_file
 from src.database import DatabaseManager
 
 try:
@@ -35,26 +37,36 @@ def main():
 
     args = parser.parse_args()
     db = DatabaseManager(config.db_path)
+    path = config.traders_json_path
 
-    if args.command == "sync":
-        db.sync_from_json(config.traders_json_path)
-        print("✔ Archivo traders.json sincronizado con la base de datos.")
+    # traders.json es la fuente de verdad: el bot lo sincroniza en cada ejecución, así
+    # que estos comandos lo modifican a él (y después la base de datos), no solo la base de datos.
+    try:
+        if args.command == "add-trader":
+            traders_file.add_trader(path, args.address, args.alias, args.bank, args.stop_loss)
+            message = f"✔ Seguimiento creado: '{args.alias}' ({args.address}) con un Bank aislado de ${args.bank:.2f} USDC."
+        elif args.command == "update-bank":
+            traders_file.update_bank(path, args.alias, args.bank)
+            message = f"✔ Bank actualizado para '{args.alias}': Nuevo capital base = ${args.bank:.2f} USDC."
+        elif args.command == "pause":
+            traders_file.set_active(path, args.alias, False)
+            message = f"⏸ Seguimiento '{args.alias}' pausado."
+        elif args.command == "resume":
+            traders_file.set_active(path, args.alias, True)
+            message = f"▶ Seguimiento '{args.alias}' reactivado."
+        else:
+            message = None
+    except ValueError as e:
+        print(f"✘ {e}")
+        sys.exit(1)
 
-    elif args.command == "add-trader":
-        db.add_trader(args.address, args.alias, args.bank, args.stop_loss)
-        print(f"✔ Seguimiento creado: '{args.alias}' ({args.address}) con un Bank aislado de ${args.bank:.2f} USDC.")
-
-    elif args.command == "update-bank":
-        db.update_trader_bank(args.alias, args.bank)
-        print(f"✔ Bank actualizado para '{args.alias}': Nuevo capital base = ${args.bank:.2f} USDC.")
-
-    elif args.command == "pause":
-        db.set_trader_active(args.alias, False)
-        print(f"⏸ Seguimiento '{args.alias}' pausado.")
-
-    elif args.command == "resume":
-        db.set_trader_active(args.alias, True)
-        print(f"▶ Seguimiento '{args.alias}' reactivado.")
+    if args.command in ("sync", "add-trader", "update-bank", "pause", "resume"):
+        removed = db.sync_from_json(path)
+        print(message or "✔ Archivo traders.json sincronizado con la base de datos.")
+        if removed:
+            print(f"⏸ Desactivados porque ya no están en traders.json: {', '.join(removed)}")
+        if args.command != "sync":
+            print(f"  Cambio guardado en {path}. Si el bot corre en GitHub Actions, haz commit y push de ese archivo.")
 
     elif args.command == "status":
         db.sync_from_json(config.traders_json_path)

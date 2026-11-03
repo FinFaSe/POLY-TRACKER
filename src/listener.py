@@ -23,7 +23,7 @@ class CopyBotMonitor:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
         self.db = DatabaseManager(cfg.db_path)
-        self.db.sync_from_json(cfg.traders_json_path)
+        self._removed_traders = self.db.sync_from_json(cfg.traders_json_path)
         self.api = PolymarketClientWrapper(cfg)
         self.sizer = ProportionalSizingEngine(
             self.db,
@@ -121,10 +121,16 @@ class CopyBotMonitor:
 
         market_price = await self.api.get_best_orderbook_price(session, token_id, side)
         if market_price is None:
-            self.db.record_buy_execution(
-                trade_id, trader["proxy_address"], token_id, market_title, outcome,
-                leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_NO_LIQUIDITY", "Libro de órdenes vacío"
-            )
+            if side == "BUY":
+                self.db.record_buy_execution(
+                    trade_id, trader["proxy_address"], token_id, market_title, outcome,
+                    leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_NO_LIQUIDITY", "Libro de órdenes vacío"
+                )
+            else:
+                self.db.record_sell_execution(
+                    trade_id, trader["proxy_address"], token_id,
+                    leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_NO_LIQUIDITY", "Libro de órdenes vacío"
+                )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"Operación descartada ({trader['alias']}): Sin liquidez en el libro de órdenes.", "WARNING")
             return "processed"
@@ -301,6 +307,11 @@ class CopyBotMonitor:
             f"Iniciando Polymarket CopyBot | Modo: {mode_str} | Ejecución: {exec_type}",
             "INFO", send_telegram=not once
         )
+        if self._removed_traders:
+            await self.notifier.notify(
+                f"Desactivados porque ya no están en traders.json: {', '.join(self._removed_traders)}",
+                "WARNING"
+            )
 
         start_time = time.time()
         async with AsyncExitStack() as stack:

@@ -36,6 +36,10 @@ No necesitas abrir una terminal para agregar o modificar tus seguimientos. Abre 
 }
 ```
 
+`traders.json` manda: en cada ejecución el bot lo copia a su base de datos.
+* Para dejar de seguir a alguien, pon `"is_active": false` o borra su entrada. Si la borras, el bot lo desactiva y conserva su historial.
+* Los comandos `python cli.py add-trader`, `update-bank`, `pause` y `resume` modifican este mismo archivo. Si el bot corre en GitHub Actions, haz commit y push del archivo después de usarlos.
+
 ### Paso 3: Configurar tus credenciales seguras en GitHub Secrets
 En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions**:
 1. En la pestaña **Variables**, puedes crear:
