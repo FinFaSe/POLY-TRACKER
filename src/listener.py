@@ -1,5 +1,7 @@
 import asyncio
 import math
+import os
+import signal
 import time
 from contextlib import AsyncExitStack
 from typing import Dict, Optional
@@ -25,6 +27,9 @@ class CopyBotMonitor:
         self.cfg = cfg
         self.db = DatabaseManager(cfg.db_path)
         self._removed_traders = self.db.sync_from_json(cfg.traders_json_path)
+        self._traders_mtime = self._file_mtime(cfg.traders_json_path)
+        self._warned_no_traders = False
+        self._stop = None  # asyncio.Event, creado en run()
         self.api = PolymarketClientWrapper(cfg)
         self.sizer = ProportionalSizingEngine(
             self.db,
@@ -33,6 +38,7 @@ class CopyBotMonitor:
         )
         self.notifier = Notifier(cfg)
         self._last_resolution_check = 0.0
+        self._last_heartbeat = time.time()
         self._warned_missing_condition = set()
 
     @staticmethod
@@ -341,11 +347,15 @@ class CopyBotMonitor:
 
         active_traders = self.db.get_active_traders()
         if not active_traders:
-            await self.notifier.notify(
-                "No hay traders activos configurados (revisa traders.json o usa cli.py).",
-                "WARNING", send_telegram=False
-            )
+            # En modo continuo esto se comprueba cada pocos segundos: avisar solo una vez.
+            if not self._warned_no_traders:
+                self._warned_no_traders = True
+                await self.notifier.notify(
+                    "No hay traders activos configurados (revisa traders.json o usa cli.py).",
+                    "WARNING", send_telegram=False
+                )
             return
+        self._warned_no_traders = False
 
         for trader in active_traders:
             try:
@@ -373,6 +383,57 @@ class CopyBotMonitor:
             except Exception as e:
                 await self.notifier.notify(f"Error monitoreando a {trader['alias']}: {e}", "ERROR")
 
+    @staticmethod
+    def _file_mtime(path: str) -> Optional[float]:
+        try:
+            return os.stat(path).st_mtime
+        except OSError:
+            return None
+
+    async def reload_traders_if_changed(self):
+        """En modo continuo, aplica los cambios de traders.json sin reiniciar el bot."""
+        mtime = self._file_mtime(self.cfg.traders_json_path)
+        if mtime is None or mtime == self._traders_mtime:
+            return
+        self._traders_mtime = mtime
+        try:
+            removed = self.db.sync_from_json(self.cfg.traders_json_path)
+        except Exception as e:
+            await self.notifier.notify(f"traders.json tiene un error y no se ha aplicado: {e}", "ERROR")
+            return
+        active = ", ".join(t["alias"] for t in self.db.get_active_traders()) or "ninguno"
+        await self.notifier.notify(f"traders.json recargado. Traders activos: {active}", "INFO")
+        if removed:
+            await self.notifier.notify(
+                f"Desactivados porque ya no están en traders.json: {', '.join(removed)}", "WARNING"
+            )
+
+    async def send_heartbeat_if_due(self):
+        """Aviso periódico de que el bot sigue vivo (HEARTBEAT_HOURS; 0 lo desactiva)."""
+        hours = self.cfg.heartbeat_hours
+        if hours <= 0 or time.time() - self._last_heartbeat < hours * 3600:
+            return
+        self._last_heartbeat = time.time()
+        traders = self.db.get_active_traders()
+        cash = sum(t["available_cash"] for t in traders)
+        await self.notifier.notify(
+            f"Sigo funcionando. Traders activos: {len(traders)}; efectivo disponible en sus sub-bancas: ${cash:.2f}.",
+            "INFO"
+        )
+
+    def request_stop(self):
+        """Pide al bucle continuo que termine al acabar el ciclo en curso (SIGTERM, SIGINT)."""
+        if self._stop is not None:
+            self._stop.set()
+
+    def _install_signal_handlers(self):
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, self.request_stop)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass  # Windows o hilo secundario: queda Ctrl+C como antes.
+
     async def run(self, once: bool = False, max_runtime_minutes: Optional[int] = None):
         mode_str = "SIMULACIÓN (Paper Trading)" if self.cfg.dry_run else "PRODUCCIÓN (Dinero Real)"
         exec_type = "Ciclo Único (--once)" if once else "Monitoreo Continuo"
@@ -396,9 +457,32 @@ class CopyBotMonitor:
                 await self.scan_once(session)
                 return
 
-            while True:
-                await self.scan_once(session)
+            self._stop = asyncio.Event()
+            self._install_signal_handlers()
+            consecutive_errors = 0
+            while not self._stop.is_set():
+                await self.reload_traders_if_changed()
+                try:
+                    await self.scan_once(session)
+                    consecutive_errors = 0
+                except Exception as e:
+                    # Un fallo puntual (red, API) no debe tumbar el bot: se avisa y se reintenta.
+                    consecutive_errors += 1
+                    await self.notifier.notify(
+                        f"Error en el ciclo de monitoreo ({consecutive_errors} seguidos): {e}", "ERROR",
+                        send_telegram=consecutive_errors == 1 or consecutive_errors % 50 == 0
+                    )
+                await self.send_heartbeat_if_due()
                 if max_runtime_minutes and (time.time() - start_time) >= (max_runtime_minutes * 60):
                     await self.notifier.notify(f"Tiempo límite alcanzado ({max_runtime_minutes} min). Finalizando ciclo limpiamente.", "INFO")
                     break
-                await asyncio.sleep(self.cfg.poll_interval)
+                # Tras errores seguidos, esperar más (hasta 5 min) para no saturar la API.
+                delay = self.cfg.poll_interval if not consecutive_errors else min(
+                    300, self.cfg.poll_interval * 2 ** min(consecutive_errors, 8)
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+            if self._stop.is_set():
+                await self.notifier.notify("Bot detenido de forma ordenada.", "INFO")

@@ -26,6 +26,9 @@ permissions:
 
 jobs:
   run-copybot:
+    # Si el bot ya corre en un servidor, crea la variable BOT_RUNS_ON_SERVER=true para que
+    # este workflow no se ejecute a la vez: copiaría las mismas operaciones dos veces.
+    if: vars.BOT_RUNS_ON_SERVER != 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: polymarket-copybot-state
