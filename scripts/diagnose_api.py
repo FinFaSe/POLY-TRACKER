@@ -306,13 +306,26 @@ async def check_markets(api, session, address: str, report: Report, last_trades:
         report.add("Detección de mercado resuelto", "WARN", "no se encontró ningún mercado resuelto de este trader para probar")
         return
     payouts = await api.get_market_resolution(session, resolved_cid)
-    if payouts and max(payouts.values()) == 1.0 and min(payouts.values()) == 0.0:
-        report.add("Detección de mercado resuelto (código del bot)", "OK", f"{resolved_cid[:12]}…: pagos {sorted(payouts.values())}")
-    else:
-        market = await api._get_json(session, f"{api.cfg.clob_host}/markets/{resolved_cid}", {})
-        detail = f"closed={market.get('closed')}, tokens={market.get('tokens')}" if isinstance(market, dict) else "sin respuesta"
+    market = await api._get_json(session, f"{api.cfg.clob_host}/markets/{resolved_cid}", {})
+    tokens = market.get("tokens") if isinstance(market, dict) else None
+    if not payouts or abs(sum(payouts.values()) - 1.0) > 1e-9:
+        detail = f"closed={market.get('closed')}, tokens={tokens}" if isinstance(market, dict) else "sin respuesta"
         report.add("Detección de mercado resuelto (código del bot)", "FAIL",
                    f"{resolved_cid[:12]}… está resuelto pero el bot no lo detecta ({detail[:300]})")
+        return
+    source = "CLOB" if market.get("closed") and any(t.get("winner") for t in tokens or []) else "blockchain"
+    # El ganador según los pagos debe ser el resultado que el mercado cotiza más alto: así se
+    # comprueba que el orden de los tokens coincide con el de los resultados del contrato.
+    priced = [t for t in (tokens or []) if t.get("price") is not None]
+    if priced and max(payouts.values()) > 0.5:
+        best_priced = max(priced, key=lambda t: float(t["price"]))
+        winner = max(payouts, key=payouts.get)
+        if str(best_priced.get("token_id")) != winner:
+            report.add("Detección de mercado resuelto (código del bot)", "FAIL",
+                       f"{resolved_cid[:12]}…: el ganador según la blockchain no es el resultado con mayor precio en el CLOB")
+            return
+    report.add("Detección de mercado resuelto (código del bot)", "OK",
+               f"{resolved_cid[:12]}…: pagos {sorted(payouts.values())}, detectado en {source} (closed={market.get('closed')})")
 
 
 async def check_end_to_end(session, address: str, report: Report, minutes: int = 30):

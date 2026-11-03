@@ -339,19 +339,42 @@ class PolymarketClientWrapper:
 
     async def get_market_resolution(self, session, condition_id: str) -> Optional[Dict[str, float]]:
         """
-        Devuelve {token_id: pago_por_share} si el mercado ya está resuelto
-        (1.0 para el resultado ganador, 0.0 para los demás), o None si sigue abierto
-        o aún no tiene ganador.
+        Devuelve {token_id: pago_por_share} si el mercado ya está resuelto (normalmente 1.0
+        para el resultado ganador y 0.0 para los demás; 0.5 y 0.5 si se resolvió a partes
+        iguales), o None si sigue abierto o no se puede saber.
         """
         if not condition_id:
             return None
         market = await self._get_json(session, f"{self.cfg.clob_host}/markets/{condition_id}", {})
-        if not isinstance(market, dict) or not market.get("closed"):
+        tokens = (market.get("tokens") or []) if isinstance(market, dict) else []
+        if not tokens:
             return None
-        tokens = market.get("tokens") or []
-        if not any(t.get("winner") for t in tokens):
+        if market.get("closed") and any(t.get("winner") for t in tokens):
+            return {str(t.get("token_id")): (1.0 if t.get("winner") else 0.0) for t in tokens}
+        # El CLOB puede tardar en marcar el mercado como cerrado aunque ya esté resuelto (y
+        # cobrable) en la blockchain: el resultado oficial está en el contrato de posiciones.
+        return await self._onchain_resolution(session, condition_id, [str(t.get("token_id")) for t in tokens])
+
+    async def _onchain_resolution(self, session, condition_id: str, token_ids: List[str]) -> Optional[Dict[str, float]]:
+        """
+        Pago por share de cada resultado según el contrato de posiciones (CTF):
+        payoutNumerators(conditionId, i) / payoutDenominator(conditionId). Un denominador 0
+        significa que aún no está resuelto. Los tokens van en el orden de los resultados
+        (el mismo en que los devuelve el CLOB). Cubre también las resoluciones 50/50.
+        """
+        cid = condition_id.lower().replace("0x", "").rjust(64, "0")
+        denominator = await self._eth_call_uint(session, self.cfg.ctf_contract_address, "0xdd34de67" + cid)
+        if not denominator:
             return None
-        return {str(t.get("token_id")): (1.0 if t.get("winner") else 0.0) for t in tokens}
+        payouts = {}
+        for index, token_id in enumerate(token_ids):
+            numerator = await self._eth_call_uint(
+                session, self.cfg.ctf_contract_address, "0x0504c814" + cid + format(index, "x").rjust(64, "0")
+            )
+            if numerator is None:
+                return None
+            payouts[token_id] = numerator / denominator
+        return payouts
 
     def check_slippage(self, leader_price: float, current_market_price: float, side: str) -> Tuple[bool, float]:
         if leader_price <= 0:

@@ -278,8 +278,12 @@ class TestMonitorWithFakeApi(unittest.TestCase):
         api.get_leader_trades_since = trades_since
         api.get_leader_token_balance = token_balance
 
+        self.telegram = []
+
         async def notify(message, level="INFO", send_telegram=True):
             self.messages.append((level, message))
+            if send_telegram:
+                self.telegram.append((level, message))
         self.monitor.notifier.notify = notify
 
     def tearDown(self):
@@ -324,6 +328,18 @@ class TestMonitorWithFakeApi(unittest.TestCase):
         self.assertEqual(self.processed(), [("tok", "BUY", "SKIPPED_NO_EQUITY", 0.0)])
         self.assertEqual(self.db.get_trader_positions(LEADER), [])
 
+    def test_skipped_trades_send_one_telegram_summary(self):
+        # 30 compras de $1 de un líder con $10.000: cada copia sería de $0,01, por debajo del mínimo.
+        now = int(time.time())
+        self.trades = [trade(now - i, token=f"t{i}", usdc=1.0) for i in range(30)]
+        asyncio.run(self.monitor.scan_once(None))
+        self.assertEqual(len([m for m in self.messages if m[1].startswith("Compra omitida")]), 30)  # en consola
+        self.assertEqual(len(self.telegram), 1)
+        level, text = self.telegram[0]
+        self.assertEqual(level, "WARNING")
+        self.assertEqual(text, "Lider: 30 operaciones nuevas, 0 copiadas. "
+                               "No copiadas: 30 por tamaño (menor que el mínimo o sin posición que vender).")
+
     def test_scan_processes_more_than_ten_trades_oldest_first(self):
         now = int(time.time())
         self.trades = [trade(now - i, token=f"t{i:02d}", usdc=50.0) for i in range(15)]  # más reciente primero
@@ -348,8 +364,10 @@ class TestMonitorWithFakeApi(unittest.TestCase):
         self.assertEqual(statuses[("other", "SELL")], "SKIPPED_STALE")
         self.assertEqual(statuses[("held", "SELL")], "SIMULATED")
         self.assertEqual(self.book_calls, [("held", "SELL")])
-        summaries = [m for lvl, m in self.messages if "Se omitieron 2 operaciones" in m]
+        summaries = [m for lvl, m in self.messages if m.startswith("Lider: 3 operaciones nuevas")]
         self.assertEqual(len(summaries), 1)
+        self.assertIn("1 copiadas", summaries[0])
+        self.assertIn("2 por antigüedad (más de 60 min)", summaries[0])
 
 
 if __name__ == "__main__":

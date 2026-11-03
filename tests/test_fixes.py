@@ -123,19 +123,34 @@ class TestResolvedMarkets(unittest.TestCase):
     def test_get_market_resolution_parsing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             api = PolymarketClientWrapper(make_config(tmpdir))
+            open_market = {"closed": False, "tokens": [{"token_id": "a", "winner": False}, {"token_id": "b", "winner": False}]}
+            # (respuesta del CLOB, pagos en la blockchain [denominador, numeradores], resultado esperado)
             cases = [
-                (None, None),
-                ({"closed": False, "tokens": [{"token_id": "a", "winner": False}]}, None),
-                ({"closed": True, "tokens": [{"token_id": "a", "winner": False}, {"token_id": "b", "winner": False}]}, None),
+                (None, None, None),
+                (open_market, [0], None),                                   # sin resolver en ningún sitio
+                (open_market, None, None),                                  # el RPC no responde
                 ({"closed": True, "tokens": [{"token_id": "a", "winner": True}, {"token_id": "b", "winner": False}]},
-                 {"a": 1.0, "b": 0.0}),
+                 None, {"a": 1.0, "b": 0.0}),                               # el CLOB ya lo marca
+                (open_market, [1, 0, 1], {"a": 0.0, "b": 1.0}),             # resuelto en la blockchain, CLOB rezagado
+                (open_market, [2, 1, 1], {"a": 0.5, "b": 0.5}),             # resolución 50/50
             ]
-            for market, expected in cases:
+            for market, chain, expected in cases:
+                calls = []
+
                 async def fake_get_json(session, url, params, market=market):
                     self.assertTrue(url.endswith("/markets/0xcond"))
                     return market
+
+                async def fake_eth_call(session, contract, data, chain=chain):
+                    calls.append(data[:10])
+                    if chain is None:
+                        return None
+                    if data.startswith("0xdd34de67"):  # payoutDenominator
+                        return chain[0]
+                    return chain[1 + int(data[-64:], 16)]  # payoutNumerators(cid, i)
                 api._get_json = fake_get_json
-                self.assertEqual(asyncio.run(api.get_market_resolution(None, "0xcond")), expected)
+                api._eth_call_uint = fake_eth_call
+                self.assertEqual(asyncio.run(api.get_market_resolution(None, "0xcond")), expected, (market, chain))
             self.assertIsNone(asyncio.run(api.get_market_resolution(None, "")))
 
     def test_monitor_settles_resolved_positions_including_paused_traders(self):

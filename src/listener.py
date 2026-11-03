@@ -3,6 +3,7 @@ import math
 import os
 import signal
 import time
+from collections import Counter
 from contextlib import AsyncExitStack
 from typing import Dict, Optional
 from config import BotConfig
@@ -107,8 +108,9 @@ class CopyBotMonitor:
 
     async def process_leader_trade(self, session, trader: Dict, trade_event: Dict) -> str:
         """
-        Procesa una operación del líder. Devuelve "stale" si se descartó por antigua,
-        "ignored" si ya estaba vista o no es válida, y "processed" en otro caso.
+        Procesa una operación del líder. Devuelve el estado con que quedó registrada
+        (SIMULATED, EXECUTED, FAILED o SKIPPED_*), o "ignored" si ya estaba vista o no es válida.
+        Los descartes no se envían uno a uno a Telegram: scan_once los resume por trader.
         """
         tx_hash = trade_event.get("transactionHash", "")
         token_id = str(trade_event.get("asset", ""))
@@ -151,11 +153,11 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_STALE", reason
                 )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-            return "stale"
+            return "SKIPPED_STALE"
 
         await self.notifier.notify(
             f"Movimiento detectado de {trader['alias']}: {side} ${leader_usdc:.2f} USDC en '{market_title}' ({outcome}) a ${leader_price:.3f}",
-            "INFO"
+            "INFO", send_telegram=False
         )
 
         market_price = await self.api.get_best_orderbook_price(session, token_id, side)
@@ -171,8 +173,8 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, 0.0, "SKIPPED_NO_LIQUIDITY", "Libro de órdenes vacío"
                 )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-            await self.notifier.notify(f"Operación descartada ({trader['alias']}): Sin liquidez en el libro de órdenes.", "WARNING")
-            return "processed"
+            await self.notifier.notify(f"Operación descartada ({trader['alias']}): Sin liquidez en el libro de órdenes.", "WARNING", send_telegram=False)
+            return "SKIPPED_NO_LIQUIDITY"
 
         slippage_ok, slippage_pct = self.api.check_slippage(leader_price, market_price, side)
         if not slippage_ok:
@@ -189,8 +191,8 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, market_price, status, reason
                 )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-            await self.notifier.notify(f"Operación descartada ({trader['alias']}): {reason}", "WARNING")
-            return "processed"
+            await self.notifier.notify(f"Operación descartada ({trader['alias']}): {reason}", "WARNING", send_telegram=False)
+            return "SKIPPED_SLIPPAGE"
 
         if side == "BUY":
             leader_equity = await self.get_leader_total_equity(session, trader["proxy_address"])
@@ -201,8 +203,8 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_EQUITY", reason
                 )
                 self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-                await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "WARNING")
-                return "processed"
+                await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "WARNING", send_telegram=False)
+                return "SKIPPED_NO_EQUITY"
             subbank_pos_val = await self.estimate_subbank_positions_value(session, trader["proxy_address"])
             decision = self.sizer.evaluate_buy(trader, leader_usdc, leader_equity, subbank_pos_val)
 
@@ -212,8 +214,8 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, market_price, "SKIPPED_SIZING", decision.reason
                 )
                 self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-                await self.notifier.notify(f"Compra omitida ({trader['alias']}): {decision.reason}", "WARNING")
-                return "processed"
+                await self.notifier.notify(f"Compra omitida ({trader['alias']}): {decision.reason}", "WARNING", send_telegram=False)
+                return "SKIPPED_SIZING"
 
             # Las sub-bancas son cifras en la base de datos: en modo real, comprobar que la
             # cartera tiene de verdad el USDC antes de comprar.
@@ -231,8 +233,8 @@ class CopyBotMonitor:
                         leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_FUNDS", reason
                     )
                     self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-                    await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "ERROR")
-                    return "processed"
+                    await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "ERROR", send_telegram=False)
+                    return "SKIPPED_NO_FUNDS"
 
             result = await self.api.execute_order(
                 token_id=token_id, side="BUY", price=market_price, usdc_amount=decision.usdc_amount,
@@ -249,6 +251,7 @@ class CopyBotMonitor:
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"{decision.reason} | {result.message}", "SUCCESS" if result.success else "ERROR")
+            return status
 
         elif side == "SELL":
             leader_remaining = await self.api.get_leader_token_balance(session, trader["proxy_address"], token_id)
@@ -264,8 +267,8 @@ class CopyBotMonitor:
                     leader_usdc, leader_price, 0.0, market_price, "SKIPPED_SIZING", decision.reason
                 )
                 self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-                await self.notifier.notify(f"Venta omitida ({trader['alias']}): {decision.reason}", "WARNING")
-                return "processed"
+                await self.notifier.notify(f"Venta omitida ({trader['alias']}): {decision.reason}", "WARNING", send_telegram=False)
+                return "SKIPPED_SIZING"
 
             shares_to_sell = decision.shares_to_sell
             note = ""
@@ -282,8 +285,8 @@ class CopyBotMonitor:
                             leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_SHARES", reason
                         )
                         self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-                        await self.notifier.notify(f"Venta omitida ({trader['alias']}): {reason}", "ERROR")
-                        return "processed"
+                        await self.notifier.notify(f"Venta omitida ({trader['alias']}): {reason}", "ERROR", send_telegram=False)
+                        return "SKIPPED_NO_SHARES"
                     note = f" (limitada a las {onchain:.2f} shares que hay en tu cartera)"
                     shares_to_sell = math.floor(onchain * 100) / 100
 
@@ -300,8 +303,9 @@ class CopyBotMonitor:
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
             await self.notifier.notify(f"{decision.reason}{note} | {result.message}", "SUCCESS" if result.success else "ERROR")
+            return status
 
-        return "processed"
+        return "ignored"
 
     async def settle_resolved_positions(self, session):
         """
@@ -378,18 +382,45 @@ class CopyBotMonitor:
                     )
 
                 trades.sort(key=lambda t: self.normalize_timestamp(t.get("timestamp", 0)))
-                stale = 0
+                outcomes = Counter()
                 for trade_event in trades:
-                    if await self.process_leader_trade(session, trader, trade_event) == "stale":
-                        stale += 1
-                if stale:
-                    await self.notifier.notify(
-                        f"Se omitieron {stale} operaciones de {trader['alias']} con más de "
-                        f"{self.cfg.max_trade_age_minutes} min de antigüedad.",
-                        "WARNING"
-                    )
+                    outcomes[await self.process_leader_trade(session, trader, trade_event)] += 1
+                await self.notify_skipped_summary(trader, outcomes)
             except Exception as e:
                 await self.notifier.notify(f"Error monitoreando a {trader['alias']}: {e}", "ERROR")
+
+    SKIP_REASONS = {
+        "SKIPPED_SIZING": "por tamaño (menor que el mínimo o sin posición que vender)",
+        "SKIPPED_SLIPPAGE": "porque el precio se movió más que el slippage permitido",
+        "SKIPPED_NO_LIQUIDITY": "por falta de liquidez",
+        "SKIPPED_STALE": "por antigüedad",
+        "SKIPPED_NO_EQUITY": "por no poder leer el patrimonio del líder",
+        "SKIPPED_NO_FUNDS": "por saldo insuficiente en tu cartera",
+        "SKIPPED_NO_SHARES": "porque tu cartera no tiene esas shares",
+    }
+    ACTIONABLE_SKIPS = {"SKIPPED_NO_EQUITY", "SKIPPED_NO_FUNDS", "SKIPPED_NO_SHARES"}
+
+    async def notify_skipped_summary(self, trader: Dict, outcomes: Counter):
+        """
+        Un solo aviso a Telegram por trader y ciclo con las operaciones no copiadas. Un trader
+        muy activo puede hacer cientos de operaciones en media hora: avisar de cada descarte
+        llenaría Telegram (y superaría sus límites de envío).
+        """
+        skipped = {k: v for k, v in outcomes.items() if k.startswith("SKIPPED_")}
+        if not skipped:
+            return
+        considered = sum(v for k, v in outcomes.items() if k != "ignored")
+        copied = outcomes.get("SIMULATED", 0) + outcomes.get("EXECUTED", 0)
+        details = ", ".join(
+            f"{n} {self.SKIP_REASONS.get(k, k)}"
+            + (f" (más de {self.cfg.max_trade_age_minutes} min)" if k == "SKIPPED_STALE" else "")
+            for k, n in sorted(skipped.items(), key=lambda kv: -kv[1])
+        )
+        level = "ERROR" if self.ACTIONABLE_SKIPS & set(skipped) else "WARNING"
+        await self.notifier.notify(
+            f"{trader['alias']}: {considered} operaciones nuevas, {copied} copiadas. No copiadas: {details}.",
+            level
+        )
 
     @staticmethod
     def _file_mtime(path: str) -> Optional[float]:
