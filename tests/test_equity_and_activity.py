@@ -301,6 +301,22 @@ class TestMonitorWithFakeApi(unittest.TestCase):
         asyncio.run(self.monitor.process_leader_trade(None, self.trader(), trade(now, usdc=1000.0)))
         self.assertEqual(self.processed(), [("tok", "BUY", "SIMULATED", 10.0)])
 
+    def test_leader_equity_is_reused_within_cache_window(self):
+        calls = []
+        original = self.monitor.api.get_leader_portfolio_value
+
+        async def counting_value(session, address):
+            calls.append(address)
+            return await original(session, address)
+        self.monitor.api.get_leader_portfolio_value = counting_value
+        now = int(time.time())
+        for i in range(5):
+            asyncio.run(self.monitor.process_leader_trade(None, self.trader(), trade(now + i, token=f"t{i}", usdc=50.0)))
+        self.assertEqual(len(calls), 1)
+        self.monitor._equity_cache[LEADER] = (time.time() - 3600, 1.0)  # caducado
+        asyncio.run(self.monitor.process_leader_trade(None, self.trader(), trade(now + 10, token="t9", usdc=50.0)))
+        self.assertEqual(len(calls), 2)
+
     def test_buy_skipped_when_equity_unknown(self):
         self.cash = None
         now = int(time.time())

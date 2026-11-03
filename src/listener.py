@@ -39,6 +39,7 @@ class CopyBotMonitor:
         self.notifier = Notifier(cfg)
         self._last_resolution_check = 0.0
         self._last_heartbeat = time.time()
+        self._equity_cache = {}
         self._warned_missing_condition = set()
 
     @staticmethod
@@ -84,17 +85,24 @@ class CopyBotMonitor:
 
     async def get_leader_total_equity(self, session, proxy_address: str) -> Optional[float]:
         """
-        Patrimonio total del líder: valor de sus posiciones + su efectivo en USDC.
-        La Data API (/value) solo da las posiciones; sin el efectivo, un líder con mucha
-        liquidez parecería apostar una parte mucho mayor de su capital.
-        Devuelve None si falta cualquiera de los dos datos.
+        Patrimonio total del líder: valor de sus posiciones + su efectivo (pUSD y USDC.e).
+        Sin el efectivo, un líder con mucha liquidez parecería apostar una parte mucho mayor
+        de su capital. Devuelve None si falta cualquiera de los dos datos.
+
+        Se reutiliza durante EQUITY_CACHE_SECONDS: calcularlo recorre todas las posiciones
+        del líder (varios segundos en carteras grandes), y un trader muy activo puede hacer
+        decenas de compras seguidas, con un patrimonio que apenas cambia entre ellas.
         """
+        cached = self._equity_cache.get(proxy_address)
+        if cached and time.time() - cached[0] < self.cfg.equity_cache_seconds:
+            return cached[1]
         positions_value = await self.api.get_leader_portfolio_value(session, proxy_address)
         if positions_value is None:
             return None
         cash = await self.api.get_leader_cash_balance(session, proxy_address)
         if cash is None:
             return None
+        self._equity_cache[proxy_address] = (time.time(), positions_value + cash)
         return positions_value + cash
 
     async def process_leader_trade(self, session, trader: Dict, trade_event: Dict) -> str:

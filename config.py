@@ -18,6 +18,8 @@ class BotConfig:
     resolution_check_interval: int = int(os.getenv("RESOLUTION_CHECK_INTERVAL_SECONDS", "300"))
     # En modo continuo, cada cuántas horas avisar por Telegram de que el bot sigue vivo (0 = nunca).
     heartbeat_hours: float = float(os.getenv("HEARTBEAT_HOURS") or "24")
+    # Durante cuántos segundos se reutiliza el patrimonio calculado de cada líder.
+    equity_cache_seconds: int = int(os.getenv("EQUITY_CACHE_SECONDS") or "60")
     # Lectura de la actividad del líder por páginas (hasta activity_page_size * max_activity_pages operaciones).
     activity_page_size: int = int(os.getenv("ACTIVITY_PAGE_SIZE") or "100")
     max_activity_pages: int = int(os.getenv("MAX_ACTIVITY_PAGES") or "10")
