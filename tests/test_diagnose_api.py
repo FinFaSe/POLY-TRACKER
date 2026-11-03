@@ -115,7 +115,7 @@ class TestDiagnoseApi(unittest.TestCase):
             "Valor de posiciones (/v2/positions)", "Efectivo en Polygon (pUSD + USDC.e)",
             "Campos de cada posición (v2)", "Shares en la blockchain (CTF)",
             "Mercado (CLOB /markets/{condition_id})", "Libro de órdenes (CLOB /book)",
-            "Detección de mercado resuelto (código del bot)",
+            "Detección de mercado resuelto (código del bot)", "Simulación de extremo a extremo",
         ]:
             self.assertEqual(s.get(check), "OK", (check, report.rows))
         self.assertTrue(any(name.startswith("RPC ") and status == "OK" for name, status, _ in report.rows))

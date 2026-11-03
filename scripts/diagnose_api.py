@@ -17,13 +17,17 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+import tempfile
+import time
 from collections import Counter
 from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import BotConfig  # noqa: E402
+from src.listener import CopyBotMonitor  # noqa: E402
 from src.polymarket_api import PolymarketClientWrapper  # noqa: E402
 
 try:
@@ -311,6 +315,53 @@ async def check_markets(api, session, address: str, report: Report, last_trades:
                    f"{resolved_cid[:12]}… está resuelto pero el bot no lo detecta ({detail[:300]})")
 
 
+async def check_end_to_end(session, address: str, report: Report, minutes: int = 30):
+    """
+    Pasa las operaciones reales del trader de los últimos 'minutes' minutos por todo el bot en
+    modo simulación (tamaño, slippage, libro de órdenes, órdenes simuladas y registro), con una
+    base de datos y un traders.json temporales. No envía órdenes ni toca el repositorio.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        traders_path = os.path.join(tmp, "traders.json")
+        with open(traders_path, "w", encoding="utf-8") as f:
+            json.dump({"traders": [{"alias": "Prueba", "proxy_address": address, "bank": 1000.0, "is_active": True}]}, f)
+        cfg = BotConfig(dry_run=True, db_path=os.path.join(tmp, "e2e.db"), traders_json_path=traders_path,
+                        telegram_token="", telegram_chat_id="", private_key="")
+        monitor = CopyBotMonitor(cfg)
+        conn = sqlite3.connect(cfg.db_path)
+        conn.execute("UPDATE tracked_traders SET last_seen_timestamp = ?", (int(time.time()) - minutes * 60,))
+        conn.commit()
+        conn.close()
+
+        messages = []
+
+        async def capture(message, level="INFO", send_telegram=True):
+            messages.append((level, message))
+        monitor.notifier.notify = capture
+
+        await monitor.scan_once(session)
+
+        conn = sqlite3.connect(cfg.db_path)
+        statuses = conn.execute("SELECT status, COUNT(*) FROM processed_trades GROUP BY status ORDER BY 2 DESC").fetchall()
+        copied = conn.execute("SELECT COALESCE(SUM(copied_usdc), 0) FROM processed_trades "
+                              "WHERE side = 'BUY' AND status = 'SIMULATED'").fetchone()[0]
+        conn.close()
+        cash = monitor.db.get_all_traders()[0]["available_cash"]
+        positions = len(monitor.db.get_trader_positions(address))
+
+    errors = [m for level, m in messages if level == "ERROR"]
+    total = sum(n for _, n in statuses)
+    summary = ", ".join(f"{status} {n}" for status, n in statuses)
+    if errors:
+        report.add("Simulación de extremo a extremo", "FAIL", f"{errors[0][:250]} ({summary or 'sin operaciones'})")
+    elif total == 0:
+        report.add("Simulación de extremo a extremo", "WARN", f"el trader no operó en los últimos {minutes} minutos")
+    else:
+        report.add("Simulación de extremo a extremo", "OK",
+                   f"{total} operaciones de los últimos {minutes} min: {summary}. Sub-banca de prueba de $1000: "
+                   f"${copied:.2f} en compras simuladas, {positions} posiciones, ${cash:.2f} de efectivo")
+
+
 async def run(address: str) -> Report:
     report = Report()
     cfg = BotConfig(dry_run=True)  # Nunca inicializa el cliente de órdenes.
@@ -336,6 +387,7 @@ async def run(address: str) -> Report:
             ("patrimonio", lambda: check_equity(api, session, address, report, last_trades)),
             ("shares en la blockchain", lambda: check_onchain_shares(api, session, address, report)),
             ("mercados", lambda: check_markets(api, session, address, report, last_trades)),
+            ("simulación", lambda: check_end_to_end(session, address, report)),
         ]:
             try:
                 await check()
