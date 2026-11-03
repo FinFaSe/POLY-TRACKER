@@ -34,6 +34,8 @@ class BotConfig:
     # Token con el que opera Polymarket (USDC.e en Polygon) para leer el efectivo de cada líder.
     collateral_token_address: str = os.getenv("COLLATERAL_TOKEN_ADDRESS") or "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
     collateral_decimals: int = int(os.getenv("COLLATERAL_DECIMALS") or "6")
+    # Contrato donde Polymarket guarda las posiciones (Conditional Tokens, ERC1155).
+    ctf_contract_address: str = os.getenv("CTF_CONTRACT_ADDRESS") or "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
     http_proxy_url: str = os.getenv("HTTP_PROXY_URL", "").strip()
 
     db_path: str = os.getenv("DB_PATH", "state/copybot.db")

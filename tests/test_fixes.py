@@ -61,9 +61,9 @@ class TestOrderProxy(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
                 api = PolymarketClientWrapper(cfg)
             self.assertIsNone(api.clob_client)
-            ok, msg = asyncio.run(api.execute_order("token", "BUY", 0.5, usdc_amount=10.0))
-            self.assertFalse(ok)
-            self.assertIn("HTTP_PROXY_URL", msg)
+            result = asyncio.run(api.execute_order("token", "BUY", 0.5, usdc_amount=10.0))
+            self.assertFalse(result.success)
+            self.assertIn("HTTP_PROXY_URL", result.message)
 
 
 class TestResolvedMarkets(unittest.TestCase):

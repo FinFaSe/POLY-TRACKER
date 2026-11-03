@@ -3,6 +3,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from config import BotConfig
 
@@ -10,6 +11,16 @@ try:
     import aiohttp
 except ImportError:
     aiohttp = None
+
+@dataclass
+class OrderResult:
+    """Resultado de una orden: solo success=True si Polymarket confirma que se llenó."""
+    success: bool
+    message: str
+    filled_usdc: float = 0.0     # USDC pagados (compra) o recibidos (venta)
+    filled_shares: float = 0.0   # shares compradas o vendidas
+    avg_price: float = 0.0       # precio medio de ejecución
+
 
 class PolymarketClientWrapper:
     """
@@ -167,27 +178,52 @@ class PolymarketClientWrapper:
             return float(data.get("value", 0.0))
         return None
 
-    async def get_leader_cash_balance(self, session, proxy_address: str) -> Optional[float]:
-        """
-        Efectivo (USDC) del líder en su wallet de Polymarket, leído en Polygon con
-        balanceOf(). Devuelve None si el RPC falla.
-        """
+    async def _eth_call_uint(self, session, contract: str, data: str) -> Optional[int]:
+        """eth_call en Polygon que devuelve un uint256. None si el RPC falla (con un reintento)."""
         if not self.cfg.polygon_rpc_url:
             return None
-        address = proxy_address.lower().replace("0x", "").rjust(64, "0")
         payload = {
             "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-            "params": [{"to": self.cfg.collateral_token_address, "data": "0x70a08231" + address}, "latest"],
+            "params": [{"to": contract, "data": data}, "latest"],
         }
         for _ in range(2):
             try:
-                data = await self._post_json(session, self.cfg.polygon_rpc_url, payload)
+                response = await self._post_json(session, self.cfg.polygon_rpc_url, payload)
             except Exception:
-                data = None
-            result = data.get("result") if isinstance(data, dict) else None
+                response = None
+            result = response.get("result") if isinstance(response, dict) else None
             if isinstance(result, str) and result.startswith("0x"):
-                return int(result, 16) / 10 ** self.cfg.collateral_decimals
+                return int(result, 16) if len(result) > 2 else 0
         return None
+
+    @staticmethod
+    def _abi_address(address: str) -> str:
+        return address.lower().replace("0x", "").rjust(64, "0")
+
+    async def get_cash_balance(self, session, address: str) -> Optional[float]:
+        """Efectivo (USDC) de una wallet de Polymarket, leído en Polygon con ERC20 balanceOf()."""
+        raw = await self._eth_call_uint(
+            session, self.cfg.collateral_token_address, "0x70a08231" + self._abi_address(address)
+        )
+        return None if raw is None else raw / 10 ** self.cfg.collateral_decimals
+
+    async def get_leader_cash_balance(self, session, proxy_address: str) -> Optional[float]:
+        """Efectivo del líder. Devuelve None si el RPC falla."""
+        return await self.get_cash_balance(session, proxy_address)
+
+    async def get_onchain_shares(self, session, address: str, token_id: str) -> Optional[float]:
+        """
+        Shares de un resultado que tiene una wallet, leídas en el contrato de posiciones de
+        Polymarket (Conditional Tokens, ERC1155 balanceOf). None si el RPC falla.
+        """
+        try:
+            token_hex = format(int(token_id), "x").rjust(64, "0")
+        except (TypeError, ValueError):
+            return None
+        raw = await self._eth_call_uint(
+            session, self.cfg.ctf_contract_address, "0x00fdd58e" + self._abi_address(address) + token_hex
+        )
+        return None if raw is None else raw / 10 ** self.cfg.collateral_decimals
 
     async def get_leader_token_balance(self, session, proxy_address: str, token_id: str) -> float:
         url = f"{self.cfg.data_api_host}/positions"
@@ -242,36 +278,103 @@ class PolymarketClientWrapper:
         is_acceptable = slippage <= self.cfg.max_slippage_pct
         return is_acceptable, slippage
 
+    def limit_price(self, leader_price: float, side: str) -> float:
+        """
+        Peor precio aceptable para la orden: el del líder más el slippage permitido.
+        La orden de mercado puede llenarse en varios niveles del libro, pero nunca peor que esto.
+        """
+        if side.upper() == "BUY":
+            price = leader_price * (1 + self.cfg.max_slippage_pct)
+        else:
+            price = leader_price * (1 - self.cfg.max_slippage_pct)
+        return min(0.99, max(0.01, price))
+
+    @staticmethod
+    def _parse_fill(resp: Dict, side: str, requested_usdc: float, requested_shares: float, price: float):
+        """
+        Cantidades realmente ejecutadas según la respuesta del CLOB (makingAmount/takingAmount).
+        Compra: making = USDC pagados, taking = shares recibidas. Venta: al revés.
+        Si no vienen o no son coherentes, se usan las solicitadas.
+        """
+        try:
+            making = float(resp.get("makingAmount") or 0)
+            taking = float(resp.get("takingAmount") or 0)
+        except (TypeError, ValueError):
+            making = taking = 0.0
+        usdc, shares = (making, taking) if side == "BUY" else (taking, making)
+        expected_usdc = requested_usdc if side == "BUY" else requested_shares * price
+        # Algunas respuestas vienen en unidades base (6 decimales).
+        if usdc > 0 and expected_usdc > 0 and usdc > expected_usdc * 1000:
+            usdc, shares = usdc / 1e6, shares / 1e6
+        if usdc > 0 and shares > 0 and 0 < usdc / shares <= 1:
+            return usdc, shares, usdc / shares
+        if side == "BUY":
+            return requested_usdc, requested_usdc / price, price
+        return requested_shares * price, requested_shares, price
+
     async def execute_order(
         self,
         token_id: str,
         side: str,
         price: float,
         usdc_amount: float = 0.0,
-        shares: float = 0.0
-    ) -> Tuple[bool, str]:
+        shares: float = 0.0,
+        limit_price: Optional[float] = None,
+    ) -> OrderResult:
+        """
+        Envía una orden de mercado FOK (se llena entera o no se ejecuta).
+        'price' es el mejor precio actual del libro, usado para la simulación y como
+        referencia; 'limit_price' es el peor precio aceptable.
+        """
+        side = side.upper()
         if self.cfg.dry_run:
             qty_info = f"${usdc_amount:.2f} USDC" if side == "BUY" else f"{shares:.4f} shares"
-            return True, f"[SIMULACIÓN DRY_RUN] Orden {side} ejecutada por {qty_info} a ${price:.4f}"
+            message = f"[SIMULACIÓN DRY_RUN] Orden {side} ejecutada por {qty_info} a ${price:.4f}"
+            if side == "BUY":
+                return OrderResult(True, message, usdc_amount, usdc_amount / price if price > 0 else 0.0, price)
+            return OrderResult(True, message, shares * price, shares, price)
 
         if not self.clob_client:
-            return False, self.clob_init_error or "Cliente CLOB no inicializado (revisa tus Secrets en GitHub o .env)"
+            return OrderResult(False, self.clob_init_error or "Cliente CLOB no inicializado (revisa tus Secrets en GitHub o .env)")
 
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import MarketOrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY, SELL
 
-            order_side = BUY if side.upper() == "BUY" else SELL
-            size = (usdc_amount / price) if order_side == BUY else shares
-
-            order_args = OrderArgs(
-                price=round(price, 3),
-                size=round(size, 2),
-                side=order_side,
-                token_id=token_id
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=round(usdc_amount, 2) if side == "BUY" else round(shares, 2),
+                side=BUY if side == "BUY" else SELL,
+                price=limit_price if limit_price else price,
+                order_type=OrderType.FOK,
             )
-            signed_order = self.clob_client.create_order(order_args)
-            resp = self.clob_client.post_order(signed_order, OrderType.FOK)
-            return True, f"Orden enviada al CLOB: {resp}"
+            signed_order = await asyncio.to_thread(self.clob_client.create_market_order, order_args)
+            resp = await asyncio.to_thread(self.clob_client.post_order, signed_order, OrderType.FOK)
         except Exception as e:
-            return False, f"Error en ejecución CLOB: {e}"
+            return OrderResult(False, f"Error en ejecución CLOB: {e}")
+
+        if not isinstance(resp, dict):
+            return OrderResult(False, f"Respuesta inesperada del CLOB: {resp}")
+        status = str(resp.get("status", "")).lower()
+        order_id = resp.get("orderID") or resp.get("orderId") or ""
+        if resp.get("success") is False or resp.get("errorMsg"):
+            return OrderResult(False, f"Polymarket rechazó la orden: {resp.get('errorMsg') or resp}")
+        if status != "matched":
+            # 'delayed' (mercados con retardo) o 'unmatched': no hay confirmación de que se llenara.
+            if order_id:
+                try:
+                    await asyncio.to_thread(self.clob_client.cancel, order_id)
+                except Exception:
+                    pass
+            return OrderResult(
+                False,
+                f"Orden no confirmada (estado '{status or 'desconocido'}', id {order_id or '?'}): "
+                "revisa en polymarket.com si llegó a ejecutarse",
+            )
+
+        usdc, filled_shares, avg_price = self._parse_fill(resp, side, usdc_amount, shares, price)
+        return OrderResult(
+            True,
+            f"Orden {side} llenada: {filled_shares:.4f} shares por ${usdc:.2f} (precio medio ${avg_price:.4f}, id {order_id})",
+            usdc, filled_shares, avg_price,
+        )

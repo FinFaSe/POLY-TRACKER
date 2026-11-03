@@ -48,7 +48,7 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
    * `MAX_ACTIVITY_PAGES` (opcional, por defecto `10`): cuántas páginas de 100 operaciones se leen por trader en cada ciclo.
 2. En la pestaña **Secrets**, agrega tus llaves (nunca las escribas en el código):
    * `POLYMARKET_PRIVATE_KEY`
-   * `POLYMARKET_PROXY_ADDRESS`
+   * `POLYMARKET_PROXY_ADDRESS` (la dirección de tu cartera de Polymarket; en modo real el bot lee en ella tu saldo de USDC y tus shares antes de operar)
    * `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE`
    * `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (opcional para recibir alertas en tu celular).
    * `POLYGON_RPC_URL` (muy recomendable): un RPC de Polygon fiable (Alchemy, Infura, QuickNode…). El bot lo usa para leer el efectivo de cada líder y calcular qué parte de su capital apuesta. Si no puede leerlo, **no copia la compra**. Sin este secret usa `https://polygon-rpc.com`, que es público y a veces falla.
@@ -60,6 +60,12 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
   Si el estado no se puede guardar (por ejemplo, porque editaste el repositorio mientras corría), el bot reintenta varias veces. Si aun así falla, te avisa por Telegram y el workflow termina en rojo: desactívalo antes de la siguiente ejecución, porque podría repetir órdenes ya enviadas.
 * **Opción B — GitHub Codespaces (En tiempo real cada 4 segundos):**
   En la página principal de tu repositorio, haz clic en el botón verde **<> Code -> pestaña Codespaces -> Create codespace on main**. Se abrirá un entorno en la nube preconfigurado donde puedes correr `python main.py` de forma continua.
+
+### Modo real: cómo se protegen tus órdenes
+Con `DRY_RUN=false`:
+* **Saldo real:** antes de cada compra, el bot lee el USDC de tu cartera (`POLYMARKET_PROXY_ADDRESS`). Si no alcanza, no compra y te avisa. Al arrancar también avisa si las sub-bancas suman más dinero del que tienes.
+* **Ventas:** nunca intenta vender más shares de las que tiene tu cartera (por ejemplo, si vendiste algo a mano).
+* **Órdenes:** se envían como órdenes de mercado *Fill-Or-Kill*, con un precio límite igual al del líder más el slippage permitido (`MAX_SLIPPAGE_PCT`). Solo se registran como ejecutadas si Polymarket confirma que se llenaron, y se guardan las cantidades y el precio medio reales. Si la orden queda en espera (`delayed`), se cancela y te avisa para que lo compruebes en polymarket.com.
 
 ### Mercados resueltos
 Cuando un mercado se resuelve, el bot cierra la posición de la sub-banca automáticamente: abona $1 por share si ganó y $0 si perdió, y te avisa por Telegram. En modo real (`DRY_RUN=false`) el bot **no cobra las ganancias en la blockchain**: entra en polymarket.com y pulsa **Claim** en los mercados ganadores. La frecuencia de esta revisión se ajusta con `RESOLUTION_CHECK_INTERVAL_SECONDS` (por defecto, 300).
