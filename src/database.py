@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -18,10 +19,17 @@ class DatabaseManager:
             os.makedirs(db_dir, exist_ok=True)
         self._init_tables()
 
+    @contextmanager
     def _get_conn(self):
+        # 'with sqlite3.connect()' confirma la transacción pero no cierra la conexión;
+        # aquí se confirma (o se deshace si hay error) y además se cierra.
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_tables(self):
         with self._get_conn() as conn:
@@ -76,13 +84,16 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE sub_positions ADD COLUMN condition_id TEXT")
             conn.commit()
 
-    def sync_from_json(self, json_path: str = "traders.json"):
+    def sync_from_json(self, json_path: str = "traders.json") -> List[str]:
         """
         Sincroniza el archivo 'traders.json' del repositorio con la base de datos.
         Esto permite agregar o editar traders directamente desde la web de GitHub.
+
+        traders.json manda: los traders que ya no aparecen en él se desactivan
+        (sus posiciones y su historial se conservan). Devuelve los alias desactivados.
         """
         if not os.path.exists(json_path):
-            return
+            return []
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -118,7 +129,19 @@ class DatabaseManager:
                         SET alias = ?, initial_bank = ?, available_cash = ?, max_drawdown_pct = ?, is_active = ?
                         WHERE proxy_address = ?
                     """, (alias, bank, new_available, max_dd, is_active, address))
+
+            listed = [str(item["proxy_address"]).lower().strip() for item in traders_list]
+            placeholders = ",".join("?" * len(listed)) or "''"
+            removed = conn.execute(
+                f"SELECT alias FROM tracked_traders WHERE is_active = 1 AND proxy_address NOT IN ({placeholders})",
+                listed,
+            ).fetchall()
+            conn.execute(
+                f"UPDATE tracked_traders SET is_active = 0 WHERE proxy_address NOT IN ({placeholders})",
+                listed,
+            )
             conn.commit()
+        return [r["alias"] for r in removed]
 
     def add_trader(self, address: str, alias: str, bank: float, max_drawdown_pct: float = 0.30):
         address = address.lower().strip()

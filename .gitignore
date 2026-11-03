@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Claves y configuración local: nunca deben subirse al repositorio
+.env
+.env.*
+
+# Archivo temporal de cli.py al guardar traders.json
+traders.json.tmp
