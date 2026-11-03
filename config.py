@@ -27,12 +27,16 @@ class BotConfig:
     clob_api_key: str = os.getenv("CLOB_API_KEY", "")
     clob_secret: str = os.getenv("CLOB_SECRET", "")
     clob_passphrase: str = os.getenv("CLOB_PASSPHRASE", "")
+    # Tipo de firma de las órdenes: 2 = cartera proxy de polymarket.com (Gnosis Safe), 1 = Poly proxy, 0 = EOA.
+    signature_type: int = int(os.getenv("POLYMARKET_SIGNATURE_TYPE") or "2")
 
     # 'or' y no solo el valor por defecto de getenv: GitHub Actions pasa los secrets no
     # configurados como cadena vacía.
     polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL") or "https://polygon-rpc.com"
-    # Token con el que opera Polymarket (USDC.e en Polygon) para leer el efectivo de cada líder.
-    collateral_token_address: str = os.getenv("COLLATERAL_TOKEN_ADDRESS") or "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    # Colateral de Polymarket desde CLOB V2 (pUSD en Polygon): saldo con el que se opera.
+    collateral_token_address: str = os.getenv("COLLATERAL_TOKEN_ADDRESS") or "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+    # Colateral anterior (USDC.e): se sigue sumando al efectivo de los líderes porque se convierte a pUSD 1:1.
+    legacy_collateral_address: str = os.getenv("LEGACY_COLLATERAL_ADDRESS", "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
     collateral_decimals: int = int(os.getenv("COLLATERAL_DECIMALS") or "6")
     # Contrato donde Polymarket guarda las posiciones (Conditional Tokens, ERC1155).
     ctf_contract_address: str = os.getenv("CTF_CONTRACT_ADDRESS") or "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"

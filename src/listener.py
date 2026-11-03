@@ -238,6 +238,10 @@ class CopyBotMonitor:
 
         elif side == "SELL":
             leader_remaining = await self.api.get_leader_token_balance(session, trader["proxy_address"], token_id)
+            if leader_remaining is None:
+                # Sin este dato no se puede calcular qué parte vendió; antes contaba como 0 y se
+                # vendía todo. La excepción deja la operación sin procesar para el próximo ciclo.
+                raise RuntimeError(f"No se pudo leer cuántas shares le quedan a {trader['alias']} en '{market_title}'")
             decision = self.sizer.evaluate_sell(trader, token_id, leader_shares, leader_remaining, market_price)
 
             if not decision.should_execute:
