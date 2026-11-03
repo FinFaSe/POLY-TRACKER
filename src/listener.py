@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 from contextlib import AsyncExitStack
 from typing import Dict, Optional
@@ -50,6 +51,30 @@ class CopyBotMonitor:
                 price = pos["avg_price"]
             total_val += pos["shares"] * price
         return total_val
+
+    async def get_own_cash(self, session) -> Optional[float]:
+        """USDC real de tu cartera de Polymarket (POLYMARKET_PROXY_ADDRESS). None si no se puede leer."""
+        if not self.cfg.proxy_address:
+            return None
+        return await self.api.get_cash_balance(session, self.cfg.proxy_address)
+
+    async def check_real_balance(self, session, once: bool):
+        """En modo real, avisa si las sub-bancas suman más efectivo del que hay en la cartera."""
+        if self.cfg.dry_run:
+            return
+        own_cash = await self.get_own_cash(session)
+        assigned = sum(t["available_cash"] for t in self.db.get_active_traders())
+        if own_cash is None:
+            await self.notifier.notify(
+                "No se pudo leer el saldo real de tu cartera: las compras se omitirán hasta que se pueda "
+                "(revisa POLYMARKET_PROXY_ADDRESS y POLYGON_RPC_URL).", "ERROR", send_telegram=not once
+            )
+        elif assigned > own_cash + 0.01:
+            await self.notifier.notify(
+                f"Las sub-bancas activas tienen ${assigned:.2f} USDC disponibles, pero tu cartera solo tiene "
+                f"${own_cash:.2f}. Las compras que no quepan en el saldo real se omitirán.",
+                "WARNING", send_telegram=not once
+            )
 
     async def get_leader_total_equity(self, session, proxy_address: str) -> Optional[float]:
         """
@@ -176,20 +201,47 @@ class CopyBotMonitor:
                 await self.notifier.notify(f"Compra omitida ({trader['alias']}): {decision.reason}", "WARNING")
                 return "processed"
 
-            success, exec_msg = await self.api.execute_order(
-                token_id=token_id, side="BUY", price=market_price, usdc_amount=decision.usdc_amount
+            # Las sub-bancas son cifras en la base de datos: en modo real, comprobar que la
+            # cartera tiene de verdad el USDC antes de comprar.
+            if not self.cfg.dry_run:
+                own_cash = await self.get_own_cash(session)
+                if own_cash is None or own_cash < decision.usdc_amount:
+                    reason = (
+                        "No se pudo leer el saldo real de tu cartera (revisa POLYMARKET_PROXY_ADDRESS y POLYGON_RPC_URL)"
+                        if own_cash is None else
+                        f"Saldo real insuficiente: tu cartera tiene ${own_cash:.2f} USDC y la orden necesita "
+                        f"${decision.usdc_amount:.2f}. Revisa los bank de traders.json"
+                    )
+                    self.db.record_buy_execution(
+                        trade_id, trader["proxy_address"], token_id, market_title, outcome,
+                        leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_FUNDS", reason
+                    )
+                    self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
+                    await self.notifier.notify(f"Compra omitida ({trader['alias']}): {reason}", "ERROR")
+                    return "processed"
+
+            result = await self.api.execute_order(
+                token_id=token_id, side="BUY", price=market_price, usdc_amount=decision.usdc_amount,
+                limit_price=self.api.limit_price(leader_price, "BUY"),
             )
-            status = ("SIMULATED" if self.cfg.dry_run else "EXECUTED") if success else "FAILED"
+            status = ("SIMULATED" if self.cfg.dry_run else "EXECUTED") if result.success else "FAILED"
+            # Se registra lo realmente ejecutado; si falló, lo solicitado (no mueve saldos).
             self.db.record_buy_execution(
                 trade_id, trader["proxy_address"], token_id, market_title, outcome,
-                leader_usdc, leader_price, decision.usdc_amount, market_price, status, exec_msg,
-                condition_id=condition_id
+                leader_usdc, leader_price,
+                result.filled_usdc if result.success else decision.usdc_amount,
+                result.avg_price if result.success else market_price,
+                status, result.message, condition_id=condition_id
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-            await self.notifier.notify(f"{decision.reason} | {exec_msg}", "SUCCESS" if success else "ERROR")
+            await self.notifier.notify(f"{decision.reason} | {result.message}", "SUCCESS" if result.success else "ERROR")
 
         elif side == "SELL":
             leader_remaining = await self.api.get_leader_token_balance(session, trader["proxy_address"], token_id)
+            if leader_remaining is None:
+                # Sin este dato no se puede calcular qué parte vendió; antes contaba como 0 y se
+                # vendía todo. La excepción deja la operación sin procesar para el próximo ciclo.
+                raise RuntimeError(f"No se pudo leer cuántas shares le quedan a {trader['alias']} en '{market_title}'")
             decision = self.sizer.evaluate_sell(trader, token_id, leader_shares, leader_remaining, market_price)
 
             if not decision.should_execute:
@@ -201,16 +253,39 @@ class CopyBotMonitor:
                 await self.notifier.notify(f"Venta omitida ({trader['alias']}): {decision.reason}", "WARNING")
                 return "processed"
 
-            success, exec_msg = await self.api.execute_order(
-                token_id=token_id, side="SELL", price=market_price, shares=decision.shares_to_sell
+            shares_to_sell = decision.shares_to_sell
+            note = ""
+            # En modo real, no intentar vender más shares de las que la cartera tiene de verdad
+            # (por ejemplo, si vendiste a mano): la orden FOK fallaría entera.
+            if not self.cfg.dry_run and self.cfg.proxy_address:
+                onchain = await self.api.get_onchain_shares(session, self.cfg.proxy_address, token_id)
+                if onchain is not None and onchain + 1e-6 < shares_to_sell:
+                    if onchain < 0.01:
+                        reason = (f"La base de datos indica {shares_to_sell:.2f} shares de la sub-banca, "
+                                  "pero tu cartera no tiene ninguna de este resultado")
+                        self.db.record_sell_execution(
+                            trade_id, trader["proxy_address"], token_id,
+                            leader_usdc, leader_price, 0.0, market_price, "SKIPPED_NO_SHARES", reason
+                        )
+                        self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
+                        await self.notifier.notify(f"Venta omitida ({trader['alias']}): {reason}", "ERROR")
+                        return "processed"
+                    note = f" (limitada a las {onchain:.2f} shares que hay en tu cartera)"
+                    shares_to_sell = math.floor(onchain * 100) / 100
+
+            result = await self.api.execute_order(
+                token_id=token_id, side="SELL", price=market_price, shares=shares_to_sell,
+                limit_price=self.api.limit_price(leader_price, "SELL"),
             )
-            status = ("SIMULATED" if self.cfg.dry_run else "EXECUTED") if success else "FAILED"
+            status = ("SIMULATED" if self.cfg.dry_run else "EXECUTED") if result.success else "FAILED"
             self.db.record_sell_execution(
-                trade_id, trader["proxy_address"], token_id,
-                leader_usdc, leader_price, decision.shares_to_sell, market_price, status, exec_msg
+                trade_id, trader["proxy_address"], token_id, leader_usdc, leader_price,
+                result.filled_shares if result.success else shares_to_sell,
+                result.avg_price if result.success else market_price,
+                status, result.message + note
             )
             self.db.update_last_seen_timestamp(trader["proxy_address"], trade_timestamp)
-            await self.notifier.notify(f"{decision.reason} | {exec_msg}", "SUCCESS" if success else "ERROR")
+            await self.notifier.notify(f"{decision.reason}{note} | {result.message}", "SUCCESS" if result.success else "ERROR")
 
         return "processed"
 
@@ -316,6 +391,7 @@ class CopyBotMonitor:
         start_time = time.time()
         async with AsyncExitStack() as stack:
             session = await stack.enter_async_context(aiohttp.ClientSession()) if aiohttp is not None else None
+            await self.check_real_balance(session, once)
             if once:
                 await self.scan_once(session)
                 return

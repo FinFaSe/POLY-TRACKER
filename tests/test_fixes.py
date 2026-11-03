@@ -35,7 +35,7 @@ class TestOrderProxy(unittest.TestCase):
     """Punto 1: las órdenes reales deben salir por HTTP_PROXY_URL."""
 
     def test_clob_http_client_is_replaced_with_proxied_client(self):
-        from py_clob_client.http_helpers import helpers
+        from py_clob_client_v2.http_helpers import helpers
 
         original = helpers._http_client
         created = []
@@ -61,9 +61,9 @@ class TestOrderProxy(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
                 api = PolymarketClientWrapper(cfg)
             self.assertIsNone(api.clob_client)
-            ok, msg = asyncio.run(api.execute_order("token", "BUY", 0.5, usdc_amount=10.0))
-            self.assertFalse(ok)
-            self.assertIn("HTTP_PROXY_URL", msg)
+            result = asyncio.run(api.execute_order("token", "BUY", 0.5, usdc_amount=10.0))
+            self.assertFalse(result.success)
+            self.assertIn("HTTP_PROXY_URL", result.message)
 
 
 class TestResolvedMarkets(unittest.TestCase):

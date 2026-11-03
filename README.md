@@ -48,10 +48,11 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
    * `MAX_ACTIVITY_PAGES` (opcional, por defecto `10`): cuántas páginas de 100 operaciones se leen por trader en cada ciclo.
 2. En la pestaña **Secrets**, agrega tus llaves (nunca las escribas en el código):
    * `POLYMARKET_PRIVATE_KEY`
-   * `POLYMARKET_PROXY_ADDRESS`
+   * `POLYMARKET_PROXY_ADDRESS` (la dirección de tu cartera de Polymarket; en modo real el bot lee en ella tu saldo de pUSD y tus shares antes de operar)
+   * `POLYMARKET_SIGNATURE_TYPE` (opcional, como variable): tipo de firma de las órdenes. `2` (por defecto) para carteras creadas en polymarket.com; `1` para carteras Poly proxy (cuenta de email/Magic); `0` si operas directamente con una wallet propia (EOA).
    * `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASSPHRASE`
    * `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (opcional para recibir alertas en tu celular).
-   * `POLYGON_RPC_URL` (muy recomendable): un RPC de Polygon fiable (Alchemy, Infura, QuickNode…). El bot lo usa para leer el efectivo de cada líder y calcular qué parte de su capital apuesta. Si no puede leerlo, **no copia la compra**. Sin este secret usa `https://polygon-rpc.com`, que es público y a veces falla.
+   * `POLYGON_RPC_URL` (muy recomendable): un RPC de Polygon fiable (Alchemy, Infura, QuickNode…). El bot lo usa para leer el efectivo de cada líder y calcular qué parte de su capital apuesta, y en modo real tu saldo y tus shares. Si no puede leerlo, **no copia la compra**. Sin este secret (o si falla) prueba varios RPCs públicos (`RPC_FALLBACK_URLS`), que funcionan pero tienen límites de uso.
    * `HTTP_PROXY_URL` (obligatorio cuando pases a `DRY_RUN=false` en GitHub Actions, ya que los servidores de GitHub están en EE.UU. y Polymarket bloquea el envío de órdenes desde IPs estadounidenses). Sin él, el bot se niega a enviar órdenes reales desde GitHub Actions.
 
 ### Paso 4: Ejecutar en GitHub Actions o GitHub Codespaces
@@ -61,5 +62,15 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
 * **Opción B — GitHub Codespaces (En tiempo real cada 4 segundos):**
   En la página principal de tu repositorio, haz clic en el botón verde **<> Code -> pestaña Codespaces -> Create codespace on main**. Se abrirá un entorno en la nube preconfigurado donde puedes correr `python main.py` de forma continua.
 
+### Modo real: cómo se protegen tus órdenes
+Con `DRY_RUN=false`:
+* **Saldo real:** antes de cada compra, el bot lee el **pUSD** de tu cartera (`POLYMARKET_PROXY_ADDRESS`). Si no alcanza, no compra y te avisa. Al arrancar también avisa si las sub-bancas suman más dinero del que tienes.
+  Desde 2026 Polymarket opera con pUSD en lugar de USDC.e (CLOB V2). En polymarket.com la conversión es automática; si tu cartera aún tiene USDC.e, conviértelo a pUSD desde la web antes de usar el bot en modo real.
+* **Ventas:** nunca intenta vender más shares de las que tiene tu cartera (por ejemplo, si vendiste algo a mano).
+* **Órdenes:** se envían como órdenes de mercado *Fill-Or-Kill*, con un precio límite igual al del líder más el slippage permitido (`MAX_SLIPPAGE_PCT`). Solo se registran como ejecutadas si Polymarket confirma que se llenaron, y se guardan las cantidades y el precio medio reales. Si la orden queda en espera (`delayed`), se cancela y te avisa para que lo compruebes en polymarket.com.
+
 ### Mercados resueltos
 Cuando un mercado se resuelve, el bot cierra la posición de la sub-banca automáticamente: abona $1 por share si ganó y $0 si perdió, y te avisa por Telegram. En modo real (`DRY_RUN=false`) el bot **no cobra las ganancias en la blockchain**: entra en polymarket.com y pulsa **Claim** en los mercados ganadores. La frecuencia de esta revisión se ajusta con `RESOLUTION_CHECK_INTERVAL_SECONDS` (por defecto, 300).
+
+### Diagnóstico de las APIs
+En **Actions → Diagnóstico de APIs (solo lectura) → Run workflow** puedes comprobar, sin operar, que todo lo que usa el bot responde como espera: la Data API v2 de Polymarket, el CLOB, los RPCs de Polygon y las lecturas en la blockchain. El resultado aparece en el resumen de la ejecución.
