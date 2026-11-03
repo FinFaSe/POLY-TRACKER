@@ -30,6 +30,7 @@ except ImportError:
     aiohttp = None
 
 NATIVE_USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+GAMMA_HOST = "https://gamma-api.polymarket.com"
 EXPECTED_TRADE_FIELDS = ["transactionHash", "asset", "side", "timestamp", "size", "price", "usdcSize", "conditionId", "title", "outcome"]
 
 
@@ -64,13 +65,64 @@ async def activity_page(api, session, address: str, offset: int, limit: int = 10
     )
 
 
+async def raw_get(session, url: str, params: Dict[str, str]):
+    """GET que devuelve (código HTTP, JSON o texto) para poder explicar los fallos."""
+    if session is None:
+        return None, "sin aiohttp"
+    async with session.get(url, params=params, timeout=15) as resp:
+        text = await resp.text()
+        try:
+            import json
+            return resp.status, json.loads(text)
+        except ValueError:
+            return resp.status, text[:300]
+
+
+def collect_wallets(data, found: Counter):
+    """Recoge todos los valores 'proxyWallet' de una respuesta JSON, esté donde esté."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "proxyWallet" and isinstance(value, str) and value.startswith("0x"):
+                found[value.lower()] += 1
+            else:
+                collect_wallets(value, found)
+    elif isinstance(data, list):
+        for item in data:
+            collect_wallets(item, found)
+
+
+async def candidate_wallets(api, session, report: Report) -> Counter:
+    wallets: Counter = Counter()
+    status, data = await raw_get(session, f"{api.cfg.data_api_host}/trades", {"limit": "100"})
+    collect_wallets(data, wallets)
+    if wallets:
+        return wallets
+    report.add("Operaciones recientes (/trades)", "WARN", f"HTTP {status}: {str(data)[:200]}")
+
+    # Plan B: mayores tenedores de los mercados con más volumen en las últimas 24 h.
+    status, markets = await raw_get(session, f"{GAMMA_HOST}/markets",
+                                    {"active": "true", "closed": "false", "order": "volume24hr",
+                                     "ascending": "false", "limit": "5"})
+    if not isinstance(markets, list):
+        report.add("Mercados con más volumen (Gamma API)", "WARN", f"HTTP {status}: {str(markets)[:200]}")
+        return wallets
+    for market in markets:
+        cid = market.get("conditionId")
+        if not cid:
+            continue
+        status, holders = await raw_get(session, f"{api.cfg.data_api_host}/holders", {"market": cid, "limit": "20"})
+        collect_wallets(holders, wallets)
+        if not wallets:
+            report.add("Mayores tenedores (/holders)", "WARN", f"HTTP {status}: {str(holders)[:200]}")
+    return wallets
+
+
 async def pick_trader(api, session, report: Report) -> Optional[str]:
     """Elige, entre los que más operan ahora mismo, uno con al menos 100 operaciones (para probar la paginación)."""
-    trades = await api._get_json(session, f"{api.cfg.data_api_host}/trades", {"limit": "500"})
-    if not isinstance(trades, list) or not trades:
-        report.add("Elegir trader activo", "FAIL", "La Data API (/trades) no devolvió operaciones recientes")
+    wallets = await candidate_wallets(api, session, report)
+    if not wallets:
+        report.add("Elegir trader activo", "FAIL", "no se encontró ningún trader; pasa una dirección con el campo 'address'")
         return None
-    wallets = Counter(str(t.get("proxyWallet", "")).lower() for t in trades if t.get("proxyWallet"))
     for wallet, _ in wallets.most_common(15):
         page = await activity_page(api, session, wallet, 0)
         if isinstance(page, list) and len(page) >= 100:
@@ -84,7 +136,9 @@ async def pick_trader(api, session, report: Report) -> Optional[str]:
 async def check_activity(api, session, address: str, report: Report) -> List[Dict]:
     page1 = await activity_page(api, session, address, 0)
     if not isinstance(page1, list):
-        report.add("Actividad (/activity)", "FAIL", f"Respuesta inesperada: {type(page1).__name__}")
+        status, body = await raw_get(session, f"{api.cfg.data_api_host}/activity",
+                                     {"user": address, "type": "TRADE", "limit": "100", "offset": "0"})
+        report.add("Actividad (/activity)", "FAIL", f"HTTP {status}: {str(body)[:200]}")
         return []
     if not page1:
         report.add("Actividad (/activity)", "WARN", "El trader no tiene operaciones")

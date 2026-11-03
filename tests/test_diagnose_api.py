@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import importlib.util
 import os
 import unittest
@@ -59,6 +60,10 @@ class FakePolymarket:
         amount = 9000 if token == wrapper.cfg.collateral_token_address else 0
         return {"result": hex(amount * 10 ** 6)}
 
+    async def raw_get(self, session, url, params):
+        data = await self.get_json(None, session, url, params)
+        return (200, data) if data is not None else (404, None)
+
     def patch(self):
         fake = self
 
@@ -68,7 +73,13 @@ class FakePolymarket:
         async def post_json(wrapper, session, url, payload):
             return await fake.post_json(wrapper, session, url, payload)
 
-        return mock.patch.multiple(PolymarketClientWrapper, _get_json=get_json, _post_json=post_json)
+        async def raw_get(session, url, params):
+            return await fake.raw_get(session, url, params)
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.multiple(PolymarketClientWrapper, _get_json=get_json, _post_json=post_json))
+        stack.enter_context(mock.patch.object(diagnose_api, "raw_get", raw_get))
+        return stack
 
 
 def statuses(report):
@@ -92,6 +103,25 @@ class TestDiagnoseApi(unittest.TestCase):
         ]:
             self.assertEqual(s.get(check), "OK", (check, report.rows))
         self.assertIn("|", report.markdown())
+
+    def test_falls_back_to_market_holders_when_trades_endpoint_fails(self):
+        fake = FakePolymarket()
+
+        async def raw_get(session, url, params):
+            if url.endswith("/trades"):
+                return 400, {"error": "bad request"}
+            if url.endswith("/markets"):
+                return 200, [{"conditionId": "0xcond"}]
+            if url.endswith("/holders"):
+                return 200, [{"token": "tok", "holders": [{"proxyWallet": WALLET, "amount": 10}]}]
+            return 404, None
+
+        fake.raw_get = raw_get
+        report = self.run_diagnosis(fake)
+        s = statuses(report)
+        self.assertEqual(s["Operaciones recientes (/trades)"], "WARN")
+        self.assertEqual(s["Elegir trader activo"], "INFO")
+        self.assertFalse(report.failed, report.rows)
 
     def test_detects_api_ignoring_offset(self):
         report = self.run_diagnosis(FakePolymarket(ignore_offset=True), address=WALLET)
