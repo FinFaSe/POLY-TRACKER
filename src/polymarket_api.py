@@ -139,7 +139,8 @@ class PolymarketClientWrapper:
         ('offset' ya no se admite). Lanza RuntimeError si la respuesta no tiene ese formato.
         """
         data = await self._get_json(session, f"{self.cfg.data_api_host}{path}", params)
-        if not isinstance(data, dict) or not isinstance(data.get("data", []), (list, type(None))):
+        # Exigir el campo 'data': una respuesta de error ({"error": ...}) no es una lista vacía.
+        if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], (list, type(None))):
             raise RuntimeError(f"La Data API v2 no devolvió datos válidos para {path}")
         pagination = data.get("pagination") or {}
         return list(data.get("data") or []), pagination.get("next_cursor"), bool(pagination.get("has_more"))
@@ -225,21 +226,37 @@ class PolymarketClientWrapper:
             return None
         return sum(float(p.get("current_value") or 0.0) for p in positions)
 
+    def rpc_urls(self) -> List[str]:
+        """RPCs de Polygon en orden de preferencia: el propio (si hay) y luego los públicos."""
+        urls = [self.cfg.polygon_rpc_url] if self.cfg.polygon_rpc_url else []
+        urls += [u for u in self.cfg.rpc_fallback_urls if u not in urls]
+        # El último que funcionó va primero, para no repetir los que fallan en cada llamada.
+        preferred = getattr(self, "_preferred_rpc", None)
+        if preferred in urls:
+            urls.remove(preferred)
+            urls.insert(0, preferred)
+        return urls
+
     async def _eth_call_uint(self, session, contract: str, data: str) -> Optional[int]:
-        """eth_call en Polygon que devuelve un uint256. None si el RPC falla (con un reintento)."""
-        if not self.cfg.polygon_rpc_url:
+        """
+        eth_call en Polygon que devuelve un uint256. Prueba cada RPC en orden (dos veces si
+        solo hay uno). None si ninguno responde.
+        """
+        urls = self.rpc_urls()
+        if not urls:
             return None
         payload = {
             "jsonrpc": "2.0", "id": 1, "method": "eth_call",
             "params": [{"to": contract, "data": data}, "latest"],
         }
-        for _ in range(2):
+        for url in (urls if len(urls) > 1 else urls * 2):
             try:
-                response = await self._post_json(session, self.cfg.polygon_rpc_url, payload)
+                response = await self._post_json(session, url, payload)
             except Exception:
                 response = None
             result = response.get("result") if isinstance(response, dict) else None
             if isinstance(result, str) and result.startswith("0x"):
+                self._preferred_rpc = url
                 return int(result, 16) if len(result) > 2 else 0
         return None
 

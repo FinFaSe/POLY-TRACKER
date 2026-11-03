@@ -22,6 +22,7 @@ def make_config(tmpdir, **overrides):
         http_proxy_url="",
         private_key="",
         polygon_rpc_url="https://rpc.example",
+        rpc_fallback_urls=(),
         max_trade_age_minutes=60,
         activity_page_size=100,
         max_activity_pages=10,
@@ -38,6 +39,19 @@ def trade(ts, side="BUY", token="tok", usdc=100.0, price=0.5, tx=None):
     }
 
 
+def v2_trade(ts, side="BUY", token="tok", usdc=100.0, price=0.5):
+    """Fila de /v2/activity, con los nombres en snake_case de la Data API v2."""
+    return {
+        "transaction_hash": f"0x{ts}{token}{side}", "token_id": token, "side": side, "type": "TRADE",
+        "timestamp": ts, "size": usdc / price, "price": price, "usdc_size": usdc,
+        "title": "Mercado", "outcome": "Yes", "condition_id": "0xcond", "proxy_wallet": LEADER,
+    }
+
+
+def envelope(rows, next_cursor=None, has_more=False):
+    return {"data": rows, "pagination": {"next_cursor": next_cursor, "has_more": has_more}}
+
+
 class TestLeaderEquityApi(unittest.TestCase):
     """Punto 4: el patrimonio del líder incluye su efectivo y los fallos no cuentan como cero."""
 
@@ -46,17 +60,40 @@ class TestLeaderEquityApi(unittest.TestCase):
             api = PolymarketClientWrapper(make_config(tmpdir))
             calls = []
 
+            balances = {api.cfg.collateral_token_address: 9000, api.cfg.legacy_collateral_address: 500}
+
             async def fake_post(session, url, payload):
                 calls.append((url, payload))
-                return {"jsonrpc": "2.0", "id": 1, "result": hex(9000 * 10 ** 6)}
+                token = payload["params"][0]["to"]
+                return {"jsonrpc": "2.0", "id": 1, "result": hex(balances[token] * 10 ** 6)}
             api._post_json = fake_post
 
-            self.assertEqual(asyncio.run(api.get_leader_cash_balance(None, LEADER)), 9000.0)
+            # Líder: pUSD + USDC.e sin convertir. Cartera propia (para comprar): solo pUSD.
+            self.assertEqual(asyncio.run(api.get_leader_cash_balance(None, LEADER)), 9500.0)
+            self.assertEqual(asyncio.run(api.get_cash_balance(None, LEADER)), 9000.0)
             url, payload = calls[0]
             self.assertEqual(url, "https://rpc.example")
             call = payload["params"][0]
-            self.assertEqual(call["to"], api.cfg.collateral_token_address)
+            self.assertEqual(call["to"], "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")  # pUSD
             self.assertEqual(call["data"], "0x70a08231" + LEADER[2:].rjust(64, "0"))
+
+    def test_rpc_falls_back_to_next_url_and_remembers_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            api = PolymarketClientWrapper(make_config(tmpdir, rpc_fallback_urls=("https://b.example", "https://c.example")))
+            calls = []
+
+            async def fake_post(session, url, payload):
+                calls.append(url)
+                if url == "https://c.example":
+                    return {"result": hex(7 * 10 ** 6)}
+                raise OSError("caído")
+            api._post_json = fake_post
+
+            self.assertEqual(asyncio.run(api.get_cash_balance(None, LEADER)), 7.0)
+            self.assertEqual(calls, ["https://rpc.example", "https://b.example", "https://c.example"])
+            calls.clear()
+            self.assertEqual(asyncio.run(api.get_cash_balance(None, LEADER)), 7.0)
+            self.assertEqual(calls, ["https://c.example"])
 
     def test_cash_balance_failure_returns_none_after_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,11 +113,50 @@ class TestLeaderEquityApi(unittest.TestCase):
     def test_portfolio_value_distinguishes_error_from_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             api = PolymarketClientWrapper(make_config(tmpdir))
-            for response, expected in [(None, None), ([], 0.0), ([{"value": 1000}], 1000.0), ({"value": 5}, 5.0)]:
-                async def fake_get(session, url, params, response=response):
-                    return response
+            pages = {
+                None: envelope([{"token_id": "a", "current_value": 600.0}], next_cursor="c2", has_more=True),
+                "c2": envelope([{"token_id": "b", "current_value": 400.0}]),
+            }
+            cases = [
+                (lambda params: None, None),                                   # la API falla
+                (lambda params: {"error": "Data API v1 has been retired"}, None),  # formato inesperado
+                (lambda params: envelope([]), 0.0),                            # sin posiciones
+                (lambda params: pages[params.get("cursor")], 1000.0),          # dos páginas
+            ]
+            for responder, expected in cases:
+                async def fake_get(session, url, params, responder=responder):
+                    self.assertTrue(url.endswith("/v2/positions"))
+                    return responder(params)
                 api._get_json = fake_get
                 self.assertEqual(asyncio.run(api.get_leader_portfolio_value(None, LEADER)), expected)
+
+    def test_leader_token_balance_onchain_then_api_then_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            api = PolymarketClientWrapper(make_config(tmpdir))
+            state = {"onchain": 12.0, "positions": envelope([{"token_id": "777", "current_size": 3.5}])}
+
+            async def onchain(session, address, token_id):
+                return state["onchain"]
+
+            async def fake_get(session, url, params):
+                return state["positions"]
+            api.get_onchain_shares = onchain
+            api._get_json = fake_get
+
+            self.assertEqual(asyncio.run(api.get_leader_token_balance(None, LEADER, "777")), 12.0)
+            state["onchain"] = None
+            self.assertEqual(asyncio.run(api.get_leader_token_balance(None, LEADER, "777")), 3.5)
+            self.assertEqual(asyncio.run(api.get_leader_token_balance(None, LEADER, "888")), 0.0)
+            state["positions"] = None
+            self.assertIsNone(asyncio.run(api.get_leader_token_balance(None, LEADER, "777")))
+
+    def test_v2_activity_rows_are_normalized_and_iso_timestamps_parsed(self):
+        row = PolymarketClientWrapper.normalize_activity(v2_trade(1_800_000_000))
+        self.assertEqual((row["transactionHash"], row["asset"], row["conditionId"], row["usdcSize"]),
+                         ("0x1800000000tokBUY", "tok", "0xcond", 100.0))
+        self.assertEqual(PolymarketClientWrapper._timestamp_seconds("2027-01-15T08:00:00Z"), 1_800_000_000)
+        self.assertEqual(PolymarketClientWrapper._timestamp_seconds("1970-01-01T00:01:40Z"), 100)
+        self.assertEqual(PolymarketClientWrapper._timestamp_seconds(1_800_000_000_000), 1_800_000_000)
 
     def test_empty_rpc_secret_falls_back_to_default(self):
         # GitHub Actions pasa los secrets no configurados como cadena vacía.
@@ -89,7 +165,9 @@ class TestLeaderEquityApi(unittest.TestCase):
         from unittest import mock
         with mock.patch.dict(os.environ, {"POLYGON_RPC_URL": ""}):
             reloaded = importlib.reload(config_module)
-            self.assertTrue(reloaded.BotConfig().polygon_rpc_url.startswith("https://"))
+            cfg = reloaded.BotConfig()
+            self.assertEqual(cfg.polygon_rpc_url, "")
+            self.assertTrue(all(u.startswith("https://") for u in cfg.rpc_fallback_urls) and cfg.rpc_fallback_urls)
         importlib.reload(config_module)
 
 
@@ -100,7 +178,7 @@ class TestLeaderActivityPagination(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.now = 1_800_000_000
         # 250 operaciones, de la más reciente a la más antigua (como la Data API).
-        self.all_trades = [trade(self.now - i) for i in range(250)]
+        self.all_trades = [v2_trade(self.now - i) for i in range(250)]
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -110,9 +188,13 @@ class TestLeaderActivityPagination(unittest.TestCase):
         self.requests = []
 
         async def fake_get(session, url, params):
+            # Simula /v2/activity: el cursor es la posición de la siguiente página.
+            assert url.endswith("/v2/activity") and "offset" not in params
             self.requests.append(dict(params))
-            offset, limit = int(params["offset"]), int(params["limit"])
-            return self.all_trades[offset:offset + limit]
+            start, limit = int(params.get("cursor", 0)), int(params["limit"])
+            rows = self.all_trades[start:start + limit]
+            more = start + limit < len(self.all_trades)
+            return envelope(rows, next_cursor=str(start + limit) if more else None, has_more=more)
         api._get_json = fake_get
         return api
 
@@ -121,7 +203,8 @@ class TestLeaderActivityPagination(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(trades), 200)
-        self.assertEqual([r["offset"] for r in self.requests], ["0", "100"])
+        self.assertEqual([r.get("cursor") for r in self.requests], [None, "100"])
+        self.assertEqual(trades[0]["asset"], "tok")  # filas traducidas a los nombres del bot
 
     def test_stops_on_short_page(self):
         trades, truncated = asyncio.run(self.api().get_leader_trades_since(None, LEADER, 0))
@@ -138,8 +221,19 @@ class TestLeaderActivityPagination(unittest.TestCase):
         api = self.api()
 
         async def flaky_get(session, url, params):
-            return self.all_trades[:100] if params["offset"] == "0" else None
+            if "cursor" not in params:
+                return envelope(self.all_trades[:100], next_cursor="100", has_more=True)
+            return None
         api._get_json = flaky_get
+        with self.assertRaises(RuntimeError):
+            asyncio.run(api.get_leader_trades_since(None, LEADER, 0))
+
+    def test_repeated_cursor_raises_instead_of_looping(self):
+        api = self.api()
+
+        async def stuck_get(session, url, params):
+            return envelope(self.all_trades[:100], next_cursor="mismo", has_more=True)
+        api._get_json = stuck_get
         with self.assertRaises(RuntimeError):
             asyncio.run(api.get_leader_trades_since(None, LEADER, 0))
 

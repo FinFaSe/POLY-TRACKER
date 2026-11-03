@@ -196,12 +196,32 @@ async def check_activity(api, session, address: str, report: Report) -> List[Dic
     return page1
 
 
+async def check_rpcs(api, session, report: Report):
+    """Qué RPCs de Polygon responden desde aquí (el bot usa el primero que funcione)."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
+    working = []
+    for url in api.rpc_urls():
+        label = "POLYGON_RPC_URL" if url == api.cfg.polygon_rpc_url else url
+        try:
+            response = await api._post_json(session, url, payload)
+            result = response.get("result") if isinstance(response, dict) else None
+            if isinstance(result, str) and result.startswith("0x"):
+                working.append(label)
+                report.add(f"RPC {label}", "OK", f"bloque {int(result, 16)}")
+            else:
+                report.add(f"RPC {label}", "WARN", f"respuesta sin bloque: {str(response)[:150]}")
+        except Exception as e:
+            report.add(f"RPC {label}", "WARN", f"no responde: {str(e)[:150]}")
+    if not working:
+        report.add("RPCs de Polygon", "FAIL", "ninguno responde: configura POLYGON_RPC_URL")
+
+
 async def check_equity(api, session, address: str, report: Report, last_trades: List[Dict]):
     value = await api.get_leader_portfolio_value(session, address)
     report.add("Valor de posiciones (/v2/positions)", "OK" if value is not None else "FAIL",
                f"${value:,.2f}" if value is not None else "la API falló")
 
-    rpc_label = "secret POLYGON_RPC_URL" if os.getenv("POLYGON_RPC_URL") else f"RPC por defecto ({api.cfg.polygon_rpc_url})"
+    rpc_label = "POLYGON_RPC_URL" if api.cfg.polygon_rpc_url else "RPCs públicos"
     pusd = await api.get_cash_balance(session, address)
     usdce = await api._erc20_balance(session, api.cfg.legacy_collateral_address, address)
     cash = await api.get_leader_cash_balance(session, address)
@@ -312,6 +332,7 @@ async def run(address: str) -> Report:
         except Exception as e:
             report.add("Comprobación de actividad", "FAIL", f"error: {e}")
         for name, check in [
+            ("RPCs", lambda: check_rpcs(api, session, report)),
             ("patrimonio", lambda: check_equity(api, session, address, report, last_trades)),
             ("shares en la blockchain", lambda: check_onchain_shares(api, session, address, report)),
             ("mercados", lambda: check_markets(api, session, address, report, last_trades)),

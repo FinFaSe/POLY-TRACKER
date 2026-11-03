@@ -35,7 +35,7 @@ class TestOrderProxy(unittest.TestCase):
     """Punto 1: las órdenes reales deben salir por HTTP_PROXY_URL."""
 
     def test_clob_http_client_is_replaced_with_proxied_client(self):
-        from py_clob_client.http_helpers import helpers
+        from py_clob_client_v2.http_helpers import helpers
 
         original = helpers._http_client
         created = []

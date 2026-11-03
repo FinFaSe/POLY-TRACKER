@@ -30,9 +30,15 @@ class BotConfig:
     # Tipo de firma de las órdenes: 2 = cartera proxy de polymarket.com (Gnosis Safe), 1 = Poly proxy, 0 = EOA.
     signature_type: int = int(os.getenv("POLYMARKET_SIGNATURE_TYPE") or "2")
 
-    # 'or' y no solo el valor por defecto de getenv: GitHub Actions pasa los secrets no
-    # configurados como cadena vacía.
-    polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL") or "https://polygon-rpc.com"
+    # RPC de Polygon propio (Alchemy, Infura…). Vacío si no se configura: GitHub Actions pasa
+    # los secrets no configurados como cadena vacía.
+    polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL") or ""
+    # RPCs públicos que se prueban en orden si el propio no está configurado o falla.
+    rpc_fallback_urls: tuple = tuple(
+        u.strip() for u in (os.getenv("RPC_FALLBACK_URLS") or
+        "https://polygon-bor-rpc.publicnode.com,https://polygon.drpc.org,https://1rpc.io/matic,https://polygon-rpc.com"
+        ).split(",") if u.strip()
+    )
     # Colateral de Polymarket desde CLOB V2 (pUSD en Polygon): saldo con el que se opera.
     collateral_token_address: str = os.getenv("COLLATERAL_TOKEN_ADDRESS") or "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
     # Colateral anterior (USDC.e): se sigue sumando al efectivo de los líderes porque se convierte a pUSD 1:1.

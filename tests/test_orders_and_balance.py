@@ -18,7 +18,7 @@ def make_config(tmpdir, **overrides):
         dry_run=False, db_path=os.path.join(tmpdir, "copybot.db"),
         traders_json_path=os.path.join(tmpdir, "no-existe.json"),
         telegram_token="", telegram_chat_id="", http_proxy_url="", private_key="",
-        proxy_address=ME, polygon_rpc_url="https://rpc.example", max_slippage_pct=0.025,
+        proxy_address=ME, polygon_rpc_url="https://rpc.example", rpc_fallback_urls=(), max_slippage_pct=0.025,
         max_trade_age_minutes=60,
     )
     values.update(overrides)
@@ -33,18 +33,15 @@ class FakeClob:
         self.posted = []
         self.cancelled = []
 
-    def create_market_order(self, args):
+    def create_and_post_market_order(self, args, options=None, order_type=None):
         self.created.append(args)
-        return {"signed": args}
-
-    def post_order(self, order, order_type):
         self.posted.append(order_type)
         if self.error:
             raise self.error
         return self.response
 
-    def cancel(self, order_id):
-        self.cancelled.append(order_id)
+    def cancel_order(self, payload):
+        self.cancelled.append(payload.orderID)
 
 
 class TestExecuteOrder(unittest.TestCase):
@@ -64,8 +61,7 @@ class TestExecuteOrder(unittest.TestCase):
         return asyncio.run(self.api.execute_order(**params))
 
     def test_matched_buy_uses_market_order_with_limit_and_real_fill(self):
-        from py_clob_client.clob_types import OrderType
-        from py_clob_client.order_builder.constants import BUY
+        from py_clob_client_v2 import OrderType
 
         clob = FakeClob({"success": True, "errorMsg": "", "orderID": "0xabc", "status": "matched",
                          "makingAmount": "9.9", "takingAmount": "19.5"})
@@ -75,7 +71,7 @@ class TestExecuteOrder(unittest.TestCase):
         self.assertAlmostEqual(result.filled_shares, 19.5)
         self.assertAlmostEqual(result.avg_price, 9.9 / 19.5)
         args = clob.created[0]
-        self.assertEqual((args.token_id, args.amount, args.side, args.price), ("123", 10.0, BUY, 0.5125))
+        self.assertEqual((args.token_id, args.amount, args.side, args.price), ("123", 10.0, "BUY", 0.5125))
         self.assertEqual(args.order_type, OrderType.FOK)
         self.assertEqual(clob.posted, [OrderType.FOK])
 
