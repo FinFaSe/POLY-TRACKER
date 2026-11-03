@@ -52,6 +52,7 @@ jobs:
           MIN_ORDER_USDC: ${{ vars.MIN_ORDER_USDC || '2.0' }}
           MAX_TRADE_AGE_MINUTES: ${{ vars.MAX_TRADE_AGE_MINUTES || '60' }}
           MAX_ACTIVITY_PAGES: ${{ vars.MAX_ACTIVITY_PAGES || '10' }}
+          POLYMARKET_SIGNATURE_TYPE: ${{ vars.POLYMARKET_SIGNATURE_TYPE || '2' }}
           POLYMARKET_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY }}
           POLYMARKET_PROXY_ADDRESS: ${{ secrets.POLYMARKET_PROXY_ADDRESS }}
           CLOB_API_KEY: ${{ secrets.CLOB_API_KEY }}
