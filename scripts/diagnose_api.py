@@ -327,6 +327,16 @@ async def check_markets(api, session, address: str, report: Report, last_trades:
     report.add("Detección de mercado resuelto (código del bot)", "OK",
                f"{resolved_cid[:12]}…: pagos {sorted(payouts.values())}, detectado en {source} (closed={market.get('closed')})")
 
+    # Lectura directa en el contrato de posiciones: debe dar el mismo reparto (valida los
+    # selectores de payoutDenominator/payoutNumerators y el orden de los resultados).
+    onchain = await api._onchain_resolution(session, resolved_cid, [str(t.get("token_id")) for t in tokens or []])
+    if onchain is None:
+        report.add("Resolución en la blockchain (CTF)", "WARN", "no se pudo leer en el contrato de posiciones")
+    elif onchain != payouts:
+        report.add("Resolución en la blockchain (CTF)", "FAIL", f"la blockchain da {onchain} y el bot usó {payouts}")
+    else:
+        report.add("Resolución en la blockchain (CTF)", "OK", f"mismo reparto que {source}: {sorted(onchain.values())}")
+
 
 async def check_end_to_end(session, address: str, report: Report, minutes: int = 30):
     """
