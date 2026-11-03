@@ -198,9 +198,17 @@ class PolymarketClientWrapper:
         Ranking de traders de Polymarket (Data API v2). period: DAY, WEEK, MONTH o ALL;
         order_by: PNL (ganancias) o VOL (volumen). Lanza RuntimeError si la API falla.
         """
-        params = {"timePeriod": period, "orderBy": order_by, "limit": str(limit)}
-        rows, _, _ = await self._data_api_v2(session, "/v2/leaderboard", params)
-        return rows
+        rows: List[Dict] = []
+        params = {"timePeriod": period, "orderBy": order_by, "limit": str(min(limit, 50))}
+        seen_cursors = set()
+        while len(rows) < limit:
+            page, next_cursor, has_more = await self._data_api_v2(session, "/v2/leaderboard", params)
+            rows.extend(page)
+            if not page or not has_more or not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            params = dict(params, cursor=str(next_cursor))
+        return rows[:limit]
 
     async def count_recent_trades(self, session, address: str, days: int = 7, max_pages: int = 3) -> Tuple[int, bool, Optional[int]]:
         """
