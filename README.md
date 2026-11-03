@@ -42,6 +42,8 @@ Cómo leer la tabla:
 * **Margen** = ganancias / volumen. Con **↓** (menos de un 3 %), el trader gana poco por cada dólar que mueve, típico de la creación de mercado o el arbitraje: la diferencia entre el precio de compra y el de venta que paga quien copia se come su ganancia.
 * Busca ganancias consistentes en varios periodos (`mes`, `semana`, `todo`), margen alto y un número moderado de operaciones.
 
+**¿Le "empujan" el precio a un trader quienes le copian?** En **Actions → Analizar seguidores de un trader** (o con `python cli.py analizar-seguidores --address 0x…`) se revisan sus operaciones recientes y lo que hicieron otras carteras con el mismo resultado justo antes y justo después. El informe muestra si hay **seguidores recurrentes** (carteras que operan en el mismo sentido poco después que él, una y otra vez y en mercados distintos), cuánto mueven frente a él, cómo se mueve el precio tras sus operaciones comparado con la tendencia previa y si vende con ganancia mientras otros siguen comprando. Es una correlación, no una prueba.
+
 `traders.json` manda: en cada ejecución el bot lo copia a su base de datos.
 * Para dejar de seguir a alguien, pon `"is_active": false` o borra su entrada. Si la borras, el bot lo desactiva y conserva su historial.
 * Los comandos `python cli.py add-trader`, `update-bank`, `pause` y `resume` modifican este mismo archivo. Si el bot corre en GitHub Actions, haz commit y push del archivo después de usarlos.

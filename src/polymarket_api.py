@@ -230,6 +230,27 @@ class PolymarketClientWrapper:
             params = dict(params, cursor=str(next_cursor))
         return count, True, last_ts
 
+    async def get_market_trades(self, session, condition_id: str, since_ts: int, max_pages: int = 10) -> Tuple[List[Dict], bool]:
+        """
+        Operaciones de todas las carteras en un mercado desde 'since_ts' (Data API v2,
+        /v2/trades?condition=…), de la más reciente a la más antigua y con los nombres de
+        campos que usa el bot. El segundo valor es True si se alcanzó el tope de páginas
+        sin llegar a 'since_ts' (faltan datos más antiguos).
+        """
+        params = {"condition": condition_id, "limit": "100"}
+        trades: List[Dict] = []
+        seen_cursors = set()
+        for _ in range(max_pages):
+            rows, next_cursor, has_more = await self._data_api_v2(session, "/v2/trades", params)
+            page = [self.normalize_activity(r) for r in rows]
+            trades.extend(page)
+            stamps = [self._timestamp_seconds(t.get("timestamp", 0)) for t in page]
+            if not has_more or not next_cursor or not stamps or min(stamps) < since_ts or next_cursor in seen_cursors:
+                return [t for t in trades if self._timestamp_seconds(t.get("timestamp", 0)) >= since_ts], False
+            seen_cursors.add(next_cursor)
+            params = dict(params, cursor=str(next_cursor))
+        return [t for t in trades if self._timestamp_seconds(t.get("timestamp", 0)) >= since_ts], True
+
     async def get_positions(self, session, address: str, max_pages: int = 20) -> Optional[List[Dict]]:
         """Posiciones abiertas de una wallet (Data API v2, todas las páginas). None si la API falla."""
         params = {"user": address.lower(), "limit": "100"}

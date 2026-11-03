@@ -385,6 +385,35 @@ async def check_end_to_end(session, address: str, report: Report, minutes: int =
                    f"${copied:.2f} en compras simuladas, {positions} posiciones, ${cash:.2f} de efectivo")
 
 
+async def check_market_trades(api, session, report: Report, last_trades: List[Dict]):
+    """Operaciones de todas las carteras en un mercado (las usa 'cli.py analizar-seguidores')."""
+    if not last_trades:
+        report.add("Operaciones de un mercado (/v2/trades)", "WARN", "sin una operación de referencia para probar")
+        return
+    cid = str(last_trades[0].get("conditionId") or "")
+    since = int(time.time()) - 3600
+    try:
+        trades, truncated = await api.get_market_trades(session, cid, since, max_pages=3)
+    except Exception as e:
+        status, body = await raw_get(session, f"{api.cfg.data_api_host}/v2/trades", {"condition": cid, "limit": "100"})
+        report.add("Operaciones de un mercado (/v2/trades)", "FAIL", f"{e} — HTTP {status}: {str(body)[:200]}")
+        return
+    if not trades:
+        report.add("Operaciones de un mercado (/v2/trades)", "WARN", "sin operaciones en la última hora en ese mercado")
+        return
+    needed = ["proxyWallet", "asset", "side", "price", "timestamp"]
+    missing = [f for f in needed if f not in trades[0]]
+    stamps = [api._timestamp_seconds(t.get("timestamp")) for t in trades]
+    ordered = all(stamps[i] >= stamps[i + 1] for i in range(len(stamps) - 1))
+    wallets = len({str(t.get("proxyWallet")).lower() for t in trades})
+    ok = not missing and ordered
+    report.add("Operaciones de un mercado (/v2/trades)", "OK" if ok else "FAIL",
+               f"{len(trades)} operaciones de {wallets} carteras en la última hora"
+               + ("" if not missing else f"; faltan campos: {', '.join(missing)} (recibidos: {', '.join(sorted(trades[0]))[:200]})")
+               + ("" if ordered else "; NO vienen de la más reciente a la más antigua")
+               + ("; hay más páginas" if truncated else ""))
+
+
 async def check_leaderboard(api, session, report: Report):
     """El ranking que usa 'cli.py top-traders' responde y trae direcciones de cartera."""
     from src.top_traders import parse_leaderboard_row
@@ -431,6 +460,7 @@ async def run(address: str) -> Report:
             ("mercados", lambda: check_markets(api, session, address, report, last_trades)),
             ("simulación", lambda: check_end_to_end(session, address, report)),
             ("ranking", lambda: check_leaderboard(api, session, report)),
+            ("operaciones del mercado", lambda: check_market_trades(api, session, report, last_trades)),
         ]:
             try:
                 await check()
