@@ -4,15 +4,22 @@
       "alias": "EjemploBallena1",
       "proxy_address": "0x0000000000000000000000000000000000000001",
       "bank": 500.0,
-      "max_drawdown_pct": 0.30,
+      "max_drawdown_pct": 0.3,
       "is_active": false
     },
     {
       "alias": "EjemploTrader2",
       "proxy_address": "0x0000000000000000000000000000000000000002",
       "bank": 250.0,
-      "max_drawdown_pct": 0.20,
+      "max_drawdown_pct": 0.2,
       "is_active": false
+    },
+    {
+      "alias": "Abkha",
+      "proxy_address": "0x7c75be8139d0e333e7c8c2e17b53575ef0804d1d",
+      "bank": 1000.0,
+      "max_drawdown_pct": 0.3,
+      "is_active": true
     }
   ]
 }

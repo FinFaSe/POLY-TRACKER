@@ -52,6 +52,8 @@ def main():
     fol_p.add_argument("--dias", type=int, default=7, help="Días hacia atrás que se revisan (por defecto 7)")
     fol_p.add_argument("--ventana", type=int, default=10, help="Minutos antes y después de cada operación (por defecto 10)")
     fol_p.add_argument("--max-operaciones", type=int, default=60, help="Operaciones más recientes que se analizan (por defecto 60)")
+    fol_p.add_argument("--max-paginas", type=int, default=30,
+                       help="Páginas de 100 operaciones por mercado como máximo (por defecto 30; súbelo en mercados muy activos)")
     fol_p.add_argument("--markdown", action="store_true", help="Salida en Markdown (la usa el workflow de GitHub Actions)")
 
     args = parser.parse_args()
@@ -214,6 +216,7 @@ def run_follower_analysis(args) -> int:
             return await follower_analysis.analyze_followers(
                 api, session, address, days=max(1, args.dias), window_minutes=max(1, args.ventana),
                 max_trades=max(1, min(500, args.max_operaciones)),
+                max_pages_per_market=max(1, min(200, args.max_paginas)),
             )
         finally:
             if session is not None:
