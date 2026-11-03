@@ -36,6 +36,8 @@ No necesitas abrir una terminal para agregar o modificar tus seguimientos. Abre 
 }
 ```
 
+**¿No sabes a quién seguir?** En **Actions → Buscar traders para copiar → Run workflow** (o con `python cli.py top-traders`) verás los mejores traders del ranking de Polymarket. Para cada uno aparecen sus ganancias, su volumen, cuántas operaciones hizo en los últimos 7 días y su dirección, lista para copiar. Evita los marcados con ⚠️: hacen cientos de operaciones a la semana (suelen ser bots) y casi todas sus copias se descartarían por ser demasiado pequeñas o llegar tarde. Busca ganancias consistentes en varios periodos (`mes`, `semana`, `todo`).
+
 `traders.json` manda: en cada ejecución el bot lo copia a su base de datos.
 * Para dejar de seguir a alguien, pon `"is_active": false` o borra su entrada. Si la borras, el bot lo desactiva y conserva su historial.
 * Los comandos `python cli.py add-trader`, `update-bank`, `pause` y `resume` modifican este mismo archivo. Si el bot corre en GitHub Actions, haz commit y push del archivo después de usarlos.

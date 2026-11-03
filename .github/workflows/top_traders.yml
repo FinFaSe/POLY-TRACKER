@@ -1,0 +1,52 @@
+name: Buscar traders para copiar
+
+# Lista los mejores traders del ranking de Polymarket, con cuántas operaciones hizo cada
+# uno en los últimos 7 días. El resultado aparece en el resumen de la ejecución.
+# Solo lee datos públicos: no usa claves ni modifica el repositorio.
+on:
+  workflow_dispatch:
+    inputs:
+      periodo:
+        description: "Periodo del ranking"
+        type: choice
+        options: [mes, semana, dia, todo]
+        default: mes
+      orden:
+        description: "Ordenar por"
+        type: choice
+        options: [ganancias, volumen]
+        default: ganancias
+      cantidad:
+        description: "Cuántos traders mostrar (1-50)"
+        required: false
+        default: "15"
+
+permissions:
+  contents: read
+
+jobs:
+  top-traders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v5
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Consultar el ranking
+        shell: bash
+        env:
+          PERIODO: ${{ github.event.inputs.periodo }}
+          ORDEN: ${{ github.event.inputs.orden }}
+          CANTIDAD: ${{ github.event.inputs.cantidad }}
+        run: |
+          python cli.py top-traders --period "$PERIODO" --order "$ORDEN" --limit "$CANTIDAD" --markdown \
+            | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -191,6 +192,35 @@ class PolymarketClientWrapper:
             seen_cursors.add(next_cursor)
             params = dict(params, cursor=str(next_cursor))
         return trades, True
+
+    async def get_leaderboard(self, session, period: str = "MONTH", order_by: str = "PNL", limit: int = 20) -> List[Dict]:
+        """
+        Ranking de traders de Polymarket (Data API v2). period: DAY, WEEK, MONTH o ALL;
+        order_by: PNL (ganancias) o VOL (volumen). Lanza RuntimeError si la API falla.
+        """
+        params = {"timePeriod": period, "orderBy": order_by, "limit": str(limit)}
+        rows, _, _ = await self._data_api_v2(session, "/v2/leaderboard", params)
+        return rows
+
+    async def count_recent_trades(self, session, address: str, days: int = 7, max_pages: int = 3) -> Tuple[int, bool, Optional[int]]:
+        """
+        Cuántas operaciones hizo una wallet en los últimos 'days' días (hasta max_pages páginas
+        de 100). Devuelve (número, si se llegó al tope de páginas, timestamp de la última).
+        """
+        since = int(time.time()) - days * 86400
+        params = {"user": address.lower(), "type": "TRADE", "limit": "100",
+                  "sort_by": "TIMESTAMP", "sort_direction": "DESC"}
+        count, last_ts = 0, None
+        for _ in range(max_pages):
+            rows, next_cursor, has_more = await self._data_api_v2(session, "/v2/activity", params)
+            stamps = [self._timestamp_seconds(r.get("timestamp", 0)) for r in rows]
+            if stamps and last_ts is None:
+                last_ts = max(stamps)
+            count += sum(1 for ts in stamps if ts >= since)
+            if not has_more or not next_cursor or not stamps or min(stamps) < since:
+                return count, False, last_ts
+            params = dict(params, cursor=str(next_cursor))
+        return count, True, last_ts
 
     async def get_positions(self, session, address: str, max_pages: int = 20) -> Optional[List[Dict]]:
         """Posiciones abiertas de una wallet (Data API v2, todas las páginas). None si la API falla."""
