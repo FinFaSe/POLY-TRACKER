@@ -22,6 +22,10 @@ on:
         description: "Operaciones más recientes que se analizan (máx. 500)"
         required: false
         default: "60"
+      max_paginas:
+        description: "Páginas de 100 operaciones por mercado (súbelo si quedan operaciones sin datos completos)"
+        required: false
+        default: "30"
 
 permissions:
   contents: read
@@ -50,6 +54,7 @@ jobs:
           DIAS: ${{ github.event.inputs.dias }}
           VENTANA: ${{ github.event.inputs.ventana_minutos }}
           MAX_OPERACIONES: ${{ github.event.inputs.max_operaciones }}
+          MAX_PAGINAS: ${{ github.event.inputs.max_paginas }}
         run: |
           python cli.py analizar-seguidores --address "$DIRECCION" --dias "$DIAS" --ventana "$VENTANA" \
-            --max-operaciones "$MAX_OPERACIONES" --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+            --max-operaciones "$MAX_OPERACIONES" --max-paginas "$MAX_PAGINAS" --markdown | tee -a "$GITHUB_STEP_SUMMARY"
