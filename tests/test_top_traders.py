@@ -61,10 +61,56 @@ class TestTopTraders(unittest.TestCase):
         traders = asyncio.run(top_traders.fetch_top_traders(FakeApi(), None, followed=[A]))
         md = top_traders.render_markdown(traders, "mes", "ganancias")
         self.assertIn("## Mejores traders de Polymarket (último mes, por ganancias)", md)
-        self.assertIn(f"| 1 | Ballena | `{A}` | $125,000 | $2,000,000 | 12 | hace 3 h | ✔ ya lo sigues |", md)
+        self.assertIn(f"| 1 | Ballena | `{A}` | $125,000 | $2,000,000 | 6.3% | 12 | hace 3 h | ✔ ya lo sigues |", md)
         self.assertIn("| 3 |", md)
         self.assertIn("-$500", md)
         self.assertIn("python cli.py add-trader", md)
+
+    def test_margin_labels(self):
+        t = top_traders.TraderSummary
+        self.assertEqual(t(1, "x", A, pnl=13_410_733, volume=1_470_236_280).margin_label(), "0.9% ↓")  # RN1
+        self.assertEqual(t(1, "x", A, pnl=981_366, volume=2_757_365).margin_label(), "35.6%")
+        self.assertEqual(t(1, "x", A, pnl=2_335_115, volume=13_209).margin_label(), "más de 100%")
+        self.assertEqual(t(1, "x", A, pnl=10, volume=0).margin_label(), "?")
+
+    def test_only_copyable_skips_inactive_and_losing_but_keeps_bots(self):
+        class DeepApi:
+            def __init__(self):
+                self.requested = None
+
+            async def get_leaderboard(self, session, period, order_by, limit):
+                self.requested = limit
+                # 1 inactivo, 2 bot activo, 3 pierde dinero, 4 activo normal, 5 activo normal
+                return [{"rank": i, "user_id": f"0x{i:040x}", "user_name": f"T{i}",
+                         "pnl": -10 if i == 3 else 1000, "volume": 5000} for i in range(1, 6)]
+
+            async def count_recent_trades(self, session, address, days=7, max_pages=3):
+                n = int(address, 16)
+                return {1: (0, False, None), 2: (300, True, int(time.time()))}.get(n, (5, False, int(time.time())))
+
+        api = DeepApi()
+        traders = asyncio.run(top_traders.fetch_top_traders(api, None, limit=2, only_copyable=True))
+        self.assertEqual(api.requested, top_traders.COPYABLE_SCAN)
+        self.assertEqual([t.name for t in traders], ["T2", "T4"])
+        self.assertTrue(traders[0].high_frequency)  # el bot se incluye, marcado
+        md = top_traders.render_markdown(traders, "mes", "ganancias", only_copyable=True)
+        self.assertIn("solo activos y con ganancias", md)
+
+    def test_leaderboard_follows_cursor_until_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = PolymarketClientWrapper(BotConfig(dry_run=True, db_path=os.path.join(tmp, "x.db")))
+            calls = []
+
+            async def fake_get(session, url, params):
+                calls.append(dict(params))
+                start = int(params.get("cursor", 0))
+                rows = [{"rank": i, "user_id": f"0x{i:040x}"} for i in range(start, start + 50)]
+                return envelope(rows, str(start + 50), True)
+            api._get_json = fake_get
+            rows = asyncio.run(api.get_leaderboard(None, "MONTH", "PNL", 100))
+            self.assertEqual(len(rows), 100)
+            self.assertEqual([c.get("cursor") for c in calls], [None, "50"])
+            self.assertEqual(calls[0]["limit"], "50")
 
     def test_skip_activity(self):
         traders = asyncio.run(top_traders.fetch_top_traders(FakeApi(), None, with_activity=False))

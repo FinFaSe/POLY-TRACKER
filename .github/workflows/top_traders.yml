@@ -20,6 +20,10 @@ on:
         description: "Cuántos traders mostrar (1-50)"
         required: false
         default: "15"
+      solo_copiables:
+        description: "Solo traders activos en los últimos 7 días y con ganancias (los bots se incluyen, marcados)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,6 +51,9 @@ jobs:
           PERIODO: ${{ github.event.inputs.periodo }}
           ORDEN: ${{ github.event.inputs.orden }}
           CANTIDAD: ${{ github.event.inputs.cantidad }}
+          SOLO_COPIABLES: ${{ github.event.inputs.solo_copiables }}
         run: |
-          python cli.py top-traders --period "$PERIODO" --order "$ORDEN" --limit "$CANTIDAD" --markdown \
+          EXTRA=()
+          if [ "$SOLO_COPIABLES" = "true" ]; then EXTRA+=(--solo-copiables); fi
+          python cli.py top-traders --period "$PERIODO" --order "$ORDEN" --limit "$CANTIDAD" "${EXTRA[@]}" --markdown \
             | tee -a "$GITHUB_STEP_SUMMARY"

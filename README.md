@@ -36,7 +36,11 @@ No necesitas abrir una terminal para agregar o modificar tus seguimientos. Abre 
 }
 ```
 
-**¿No sabes a quién seguir?** En **Actions → Buscar traders para copiar → Run workflow** (o con `python cli.py top-traders`) verás los mejores traders del ranking de Polymarket. Para cada uno aparecen sus ganancias, su volumen, cuántas operaciones hizo en los últimos 7 días y su dirección, lista para copiar. Evita los marcados con ⚠️: hacen cientos de operaciones a la semana (suelen ser bots) y casi todas sus copias se descartarían por ser demasiado pequeñas o llegar tarde. Busca ganancias consistentes en varios periodos (`mes`, `semana`, `todo`).
+**¿No sabes a quién seguir?** En **Actions → Buscar traders para copiar → Run workflow** (o con `python cli.py top-traders`) verás los mejores traders del ranking de Polymarket. Para cada uno aparecen sus ganancias, su volumen, cuántas operaciones hizo en los últimos 7 días y su dirección, lista para copiar. Marca **solo copiables** (o usa `--solo-copiables`) para ver únicamente traders activos en los últimos 7 días y con ganancias, buscando entre los 100 primeros del ranking: los primeros puestos suelen estar ocupados por traders que ya no operan.
+Cómo leer la tabla:
+* **⚠️** = cientos de operaciones a la semana (suelen ser bots): casi todas sus copias se descartan por ser demasiado pequeñas respecto a su capital o por llegar tarde.
+* **Margen** = ganancias / volumen. Con **↓** (menos de un 3 %), el trader gana poco por cada dólar que mueve, típico de la creación de mercado o el arbitraje: la diferencia entre el precio de compra y el de venta que paga quien copia se come su ganancia.
+* Busca ganancias consistentes en varios periodos (`mes`, `semana`, `todo`), margen alto y un número moderado de operaciones.
 
 `traders.json` manda: en cada ejecución el bot lo copia a su base de datos.
 * Para dejar de seguir a alguien, pon `"is_active": false` o borra su entrada. Si la borras, el bot lo desactiva y conserva su historial.

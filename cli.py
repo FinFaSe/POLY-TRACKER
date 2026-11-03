@@ -41,6 +41,9 @@ def main():
     top_p.add_argument("--order", choices=list(top_traders.ORDERS), default="ganancias", help="Ordenar por ganancias o por volumen")
     top_p.add_argument("--limit", type=int, default=15, help="Cuántos traders mostrar (1-50, por defecto 15)")
     top_p.add_argument("--sin-actividad", action="store_true", help="No contar las operaciones de cada trader (más rápido)")
+    top_p.add_argument("--solo-copiables", action="store_true",
+                       help=f"Solo traders con ganancias y activos en los últimos 7 días, buscando entre los "
+                            f"{top_traders.COPYABLE_SCAN} primeros del ranking (los bots se incluyen, marcados con ⚠️)")
     top_p.add_argument("--markdown", action="store_true", help="Salida en Markdown (la usa el workflow de GitHub Actions)")
 
     args = parser.parse_args()
@@ -139,6 +142,7 @@ def run_top_traders(args) -> int:
             return await top_traders.fetch_top_traders(
                 api, session, args.period, args.order, limit,
                 with_activity=not args.sin_actividad, followed=followed,
+                only_copyable=args.solo_copiables,
             )
         finally:
             if session is not None:
@@ -150,15 +154,19 @@ def run_top_traders(args) -> int:
         print(f"✘ No se pudo consultar el ranking de Polymarket: {e}", file=sys.stderr)
         return 1
     if not traders:
-        print("✘ El ranking de Polymarket no devolvió traders.", file=sys.stderr)
+        detail = (f" Ninguno de los {top_traders.COPYABLE_SCAN} primeros está activo y con ganancias; prueba otro periodo."
+                  if args.solo_copiables else "")
+        print(f"✘ El ranking de Polymarket no devolvió traders.{detail}", file=sys.stderr)
         return 1
 
     if args.markdown:
-        print(top_traders.render_markdown(traders, args.period, args.order), end="")
+        print(top_traders.render_markdown(traders, args.period, args.order, args.solo_copiables), end="")
         return 0
 
     title = f"Mejores traders de Polymarket ({top_traders.PERIOD_LABELS[args.period]}, por {args.order})"
-    headers = ["#", "Trader", "Dirección", "Ganancias", "Volumen", "Operaciones 7 días", "Última operación"]
+    if args.solo_copiables:
+        title += " — solo activos y con ganancias"
+    headers = ["#", "Trader", "Dirección", "Ganancias", "Volumen", "Margen", "Operaciones 7 días", "Última operación"]
     rows = top_traders.render_rows(traders)
     if console and Table:
         table = Table(title=title)
