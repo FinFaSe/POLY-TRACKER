@@ -1,0 +1,30 @@
+# Polymarket CopyBot en modo continuo (tiempo real) en un servidor.
+#
+#   cp .env.example .env      # y rellénalo
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# No lo ejecutes a la vez que el workflow de GitHub Actions: cada uno tendría su propia
+# base de datos y copiaría las mismas operaciones dos veces. Ver README.
+services:
+  copybot:
+    build: .
+    container_name: polymarket-copybot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Base de datos del servidor: en ./data, fuera del repositorio (no se sube a GitHub).
+      DB_PATH: /app/data/copybot.db
+      # traders.json se lee de la carpeta del repositorio montada en /app/config: al hacer
+      # 'git pull' o editarlo, el bot aplica los cambios sin reiniciar.
+      TRADERS_JSON_PATH: /app/config/traders.json
+    volumes:
+      - ./data:/app/data
+      - ./:/app/config:ro
+    # Deja tiempo para terminar el ciclo en curso al hacer 'docker compose down'.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

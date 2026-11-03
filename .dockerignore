@@ -1,0 +1,14 @@
+# Nunca meter claves ni estado en la imagen: .env se pasa con env_file y el estado
+# vive en el volumen ./data.
+.env
+.env.*
+!.env.example
+.git
+.github
+data/
+state/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

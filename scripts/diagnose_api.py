@@ -17,13 +17,17 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+import tempfile
+import time
 from collections import Counter
 from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import BotConfig  # noqa: E402
+from src.listener import CopyBotMonitor  # noqa: E402
 from src.polymarket_api import PolymarketClientWrapper  # noqa: E402
 
 try:
@@ -302,13 +306,83 @@ async def check_markets(api, session, address: str, report: Report, last_trades:
         report.add("Detección de mercado resuelto", "WARN", "no se encontró ningún mercado resuelto de este trader para probar")
         return
     payouts = await api.get_market_resolution(session, resolved_cid)
-    if payouts and max(payouts.values()) == 1.0 and min(payouts.values()) == 0.0:
-        report.add("Detección de mercado resuelto (código del bot)", "OK", f"{resolved_cid[:12]}…: pagos {sorted(payouts.values())}")
-    else:
-        market = await api._get_json(session, f"{api.cfg.clob_host}/markets/{resolved_cid}", {})
-        detail = f"closed={market.get('closed')}, tokens={market.get('tokens')}" if isinstance(market, dict) else "sin respuesta"
+    market = await api._get_json(session, f"{api.cfg.clob_host}/markets/{resolved_cid}", {})
+    tokens = market.get("tokens") if isinstance(market, dict) else None
+    if not payouts or abs(sum(payouts.values()) - 1.0) > 1e-9:
+        detail = f"closed={market.get('closed')}, tokens={tokens}" if isinstance(market, dict) else "sin respuesta"
         report.add("Detección de mercado resuelto (código del bot)", "FAIL",
                    f"{resolved_cid[:12]}… está resuelto pero el bot no lo detecta ({detail[:300]})")
+        return
+    source = "CLOB" if market.get("closed") and any(t.get("winner") for t in tokens or []) else "blockchain"
+    # El ganador según los pagos debe ser el resultado que el mercado cotiza más alto: así se
+    # comprueba que el orden de los tokens coincide con el de los resultados del contrato.
+    priced = [t for t in (tokens or []) if t.get("price") is not None]
+    if priced and max(payouts.values()) > 0.5:
+        best_priced = max(priced, key=lambda t: float(t["price"]))
+        winner = max(payouts, key=payouts.get)
+        if str(best_priced.get("token_id")) != winner:
+            report.add("Detección de mercado resuelto (código del bot)", "FAIL",
+                       f"{resolved_cid[:12]}…: el ganador según la blockchain no es el resultado con mayor precio en el CLOB")
+            return
+    report.add("Detección de mercado resuelto (código del bot)", "OK",
+               f"{resolved_cid[:12]}…: pagos {sorted(payouts.values())}, detectado en {source} (closed={market.get('closed')})")
+
+    # Lectura directa en el contrato de posiciones: debe dar el mismo reparto (valida los
+    # selectores de payoutDenominator/payoutNumerators y el orden de los resultados).
+    onchain = await api._onchain_resolution(session, resolved_cid, [str(t.get("token_id")) for t in tokens or []])
+    if onchain is None:
+        report.add("Resolución en la blockchain (CTF)", "WARN", "no se pudo leer en el contrato de posiciones")
+    elif onchain != payouts:
+        report.add("Resolución en la blockchain (CTF)", "FAIL", f"la blockchain da {onchain} y el bot usó {payouts}")
+    else:
+        report.add("Resolución en la blockchain (CTF)", "OK", f"mismo reparto que {source}: {sorted(onchain.values())}")
+
+
+async def check_end_to_end(session, address: str, report: Report, minutes: int = 30):
+    """
+    Pasa las operaciones reales del trader de los últimos 'minutes' minutos por todo el bot en
+    modo simulación (tamaño, slippage, libro de órdenes, órdenes simuladas y registro), con una
+    base de datos y un traders.json temporales. No envía órdenes ni toca el repositorio.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        traders_path = os.path.join(tmp, "traders.json")
+        with open(traders_path, "w", encoding="utf-8") as f:
+            json.dump({"traders": [{"alias": "Prueba", "proxy_address": address, "bank": 1000.0, "is_active": True}]}, f)
+        cfg = BotConfig(dry_run=True, db_path=os.path.join(tmp, "e2e.db"), traders_json_path=traders_path,
+                        telegram_token="", telegram_chat_id="", private_key="")
+        monitor = CopyBotMonitor(cfg)
+        conn = sqlite3.connect(cfg.db_path)
+        conn.execute("UPDATE tracked_traders SET last_seen_timestamp = ?", (int(time.time()) - minutes * 60,))
+        conn.commit()
+        conn.close()
+
+        messages = []
+
+        async def capture(message, level="INFO", send_telegram=True):
+            messages.append((level, message))
+        monitor.notifier.notify = capture
+
+        await monitor.scan_once(session)
+
+        conn = sqlite3.connect(cfg.db_path)
+        statuses = conn.execute("SELECT status, COUNT(*) FROM processed_trades GROUP BY status ORDER BY 2 DESC").fetchall()
+        copied = conn.execute("SELECT COALESCE(SUM(copied_usdc), 0) FROM processed_trades "
+                              "WHERE side = 'BUY' AND status = 'SIMULATED'").fetchone()[0]
+        conn.close()
+        cash = monitor.db.get_all_traders()[0]["available_cash"]
+        positions = len(monitor.db.get_trader_positions(address))
+
+    errors = [m for level, m in messages if level == "ERROR"]
+    total = sum(n for _, n in statuses)
+    summary = ", ".join(f"{status} {n}" for status, n in statuses)
+    if errors:
+        report.add("Simulación de extremo a extremo", "FAIL", f"{errors[0][:250]} ({summary or 'sin operaciones'})")
+    elif total == 0:
+        report.add("Simulación de extremo a extremo", "WARN", f"el trader no operó en los últimos {minutes} minutos")
+    else:
+        report.add("Simulación de extremo a extremo", "OK",
+                   f"{total} operaciones de los últimos {minutes} min: {summary}. Sub-banca de prueba de $1000: "
+                   f"${copied:.2f} en compras simuladas, {positions} posiciones, ${cash:.2f} de efectivo")
 
 
 async def run(address: str) -> Report:
@@ -336,6 +410,7 @@ async def run(address: str) -> Report:
             ("patrimonio", lambda: check_equity(api, session, address, report, last_trades)),
             ("shares en la blockchain", lambda: check_onchain_shares(api, session, address, report)),
             ("mercados", lambda: check_markets(api, session, address, report, last_trades)),
+            ("simulación", lambda: check_end_to_end(session, address, report)),
         ]:
             try:
                 await check()

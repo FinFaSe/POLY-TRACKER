@@ -55,12 +55,41 @@ En tu repositorio de GitHub, ve a **Settings -> Secrets and variables -> Actions
    * `POLYGON_RPC_URL` (muy recomendable): un RPC de Polygon fiable (Alchemy, Infura, QuickNode…). El bot lo usa para leer el efectivo de cada líder y calcular qué parte de su capital apuesta, y en modo real tu saldo y tus shares. Si no puede leerlo, **no copia la compra**. Sin este secret (o si falla) prueba varios RPCs públicos (`RPC_FALLBACK_URLS`), que funcionan pero tienen límites de uso.
    * `HTTP_PROXY_URL` (obligatorio cuando pases a `DRY_RUN=false` en GitHub Actions, ya que los servidores de GitHub están en EE.UU. y Polymarket bloquea el envío de órdenes desde IPs estadounidenses). Sin él, el bot se niega a enviar órdenes reales desde GitHub Actions.
 
-### Paso 4: Ejecutar en GitHub Actions o GitHub Codespaces
-* **Opción A — GitHub Actions (Automático y gratuito):**
-  Ve a la pestaña **Actions** de tu repositorio, selecciona **Polymarket CopyBot Runner** y haz clic en **Run workflow**. El bot escaneará los movimientos, actualizará la base de datos en `state/copybot.db` y guardará automáticamente el estado de cada `bank` en tu repositorio.
-  Si el estado no se puede guardar (por ejemplo, porque editaste el repositorio mientras corría), el bot reintenta varias veces. Si aun así falla, te avisa por Telegram y el workflow termina en rojo: desactívalo antes de la siguiente ejecución, porque podría repetir órdenes ya enviadas.
-* **Opción B — GitHub Codespaces (En tiempo real cada 4 segundos):**
-  En la página principal de tu repositorio, haz clic en el botón verde **<> Code -> pestaña Codespaces -> Create codespace on main**. Se abrirá un entorno en la nube preconfigurado donde puedes correr `python main.py` de forma continua.
+### Paso 4: Elegir dónde se ejecuta el bot
+Elige **una** de estas dos opciones, nunca las dos a la vez: cada una tiene su propia base de datos y copiarían las mismas operaciones dos veces.
+
+* **Opción A — Servidor con Docker (tiempo real, recomendada):** el bot revisa a los traders cada 4 segundos (`POLL_INTERVAL_SECONDS`), así que copia al precio más parecido al del líder. Ver la sección siguiente.
+* **Opción B — GitHub Actions (sin servidor, con retraso):** ve a **Actions → Polymarket CopyBot Runner → Run workflow**. Para que se ejecute solo, descomenta las dos líneas de `schedule` en `.github/workflows/copybot.yml`. GitHub no garantiza la puntualidad: con la programación cada 5 minutos suele ejecutarse con 10-30 minutos de retraso, y las compras con más de `MAX_TRADE_AGE_MINUTES` se descartan. Úsala para pruebas o si te vale ese retraso. Ten en cuenta también que las condiciones de GitHub limitan Actions a tareas relacionadas con el desarrollo del software, así que para tenerlo funcionando de forma permanente es preferible un servidor.
+  El estado se guarda en `state/copybot.db` dentro del repositorio. Si no se puede guardar (por ejemplo, porque editaste el repositorio mientras corría), el bot reintenta varias veces. Si aun así falla, te avisa por Telegram y el workflow termina en rojo: desactívalo antes de la siguiente ejecución, porque podría repetir órdenes ya enviadas.
+
+GitHub Codespaces no sirve para tenerlo encendido: se apaga solo tras 30 minutos sin actividad.
+
+### Ejecutar en tiempo real en un servidor (Docker)
+Necesitas un servidor Linux siempre encendido (un VPS básico de 1 GB de RAM basta) **fuera de EE. UU. y de los demás países donde Polymarket no permite operar**; así no hace falta `HTTP_PROXY_URL`.
+
+1. Instala Docker y clona el repositorio:
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   git clone https://github.com/FinFaSe/POLY-TRACKER.git && cd POLY-TRACKER
+   ```
+2. Crea tu configuración a partir del ejemplo y rellénala (empieza con `DRY_RUN=true`):
+   ```bash
+   cp .env.example .env && nano .env
+   ```
+3. Arranca el bot y mira sus mensajes:
+   ```bash
+   docker compose up -d --build
+   docker compose logs -f
+   ```
+4. En GitHub, crea la variable `BOT_RUNS_ON_SERVER` con valor `true` (**Settings → Secrets and variables → Actions → Variables**). Así el workflow de GitHub Actions no se ejecutará aunque alguien lo lance o reactive su programación.
+
+Cómo funciona en el servidor:
+* **Traders:** edita `traders.json` (o haz `git pull` si lo cambias en GitHub). El bot aplica los cambios en el siguiente ciclo, sin reiniciar.
+* **Estado:** la base de datos vive en la carpeta `data/` del servidor, no en GitHub. Si antes usaste GitHub Actions y quieres conservar ese estado, copia `state/copybot.db` a `data/copybot.db` antes del primer arranque.
+* **Fallos:** si la API de Polymarket o la red fallan, el bot reintenta con esperas crecientes y te avisa por Telegram (una vez, no en cada intento). Si el proceso se cae, Docker lo reinicia solo (`restart: unless-stopped`).
+* **Señal de vida:** cada 24 horas (`HEARTBEAT_HOURS`) recibes un aviso de que sigue funcionando. Si deja de llegar, revisa el servidor.
+* **Actualizar el código:** `git pull && docker compose up -d --build`.
+* **Detenerlo:** `docker compose down` (termina el ciclo en curso antes de salir).
 
 ### Modo real: cómo se protegen tus órdenes
 Con `DRY_RUN=false`:

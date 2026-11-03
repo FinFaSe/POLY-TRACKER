@@ -23,9 +23,11 @@ def envelope(rows, next_cursor=None, has_more=False):
 class FakePolymarket:
     """Simula la Data API v2, el CLOB y el RPC de Polygon."""
 
-    def __init__(self, ignore_cursor=False, onchain_mismatch=False):
+    def __init__(self, ignore_cursor=False, onchain_mismatch=False, clob_lagging=False):
         self.ignore_cursor = ignore_cursor
         self.onchain_mismatch = onchain_mismatch
+        # El CLOB aún no marca el mercado resuelto como cerrado (pasa en Polymarket real).
+        self.clob_lagging = clob_lagging
         now = 1_800_000_000
         self.trades = [
             {"transaction_hash": f"0x{i}", "token_id": "111", "side": "BUY" if i % 2 == 0 else "SELL",
@@ -53,6 +55,9 @@ class FakePolymarket:
         if url.endswith("/markets/0xcond"):
             return {"closed": False, "tokens": [{"token_id": "111", "winner": False}, {"token_id": "112", "winner": False}]}
         if url.endswith("/markets/0xres"):
+            if self.clob_lagging:
+                return {"closed": False, "tokens": [{"token_id": "222", "price": 0.9995, "winner": False},
+                                                    {"token_id": "223", "price": 0.0005, "winner": False}]}
             return {"closed": True, "tokens": [{"token_id": "222", "winner": True}, {"token_id": "223", "winner": False}]}
         if url.endswith("/book"):
             return {"asks": [{"price": "0.55"}], "bids": [{"price": "0.53"}]}
@@ -66,6 +71,11 @@ class FakePolymarket:
         if data.startswith("0x70a08231"):  # ERC20 balanceOf
             amount = 9000 if call["to"].lower() == PUSD.lower() else 500
             return {"result": hex(amount * 10 ** 6)}
+        if data.startswith("0xdd34de67"):  # CTF payoutDenominator(conditionId)
+            # Los condition_id falsos ("0xres", "0xcond") llegan sin traducir al final de 'data'.
+            return {"result": hex(1 if data.endswith("res") else 0)}
+        if data.startswith("0x0504c814"):  # CTF payoutNumerators(conditionId, index)
+            return {"result": hex(1 if int(data[-64:], 16) == 0 else 0)}
         if data.startswith("0x00fdd58e"):  # CTF balanceOf(owner, tokenId)
             token = str(int(data[-64:], 16))
             size = {p["token_id"]: p["current_size"] for p in self.positions}.get(token, 0)
@@ -115,7 +125,8 @@ class TestDiagnoseApi(unittest.TestCase):
             "Valor de posiciones (/v2/positions)", "Efectivo en Polygon (pUSD + USDC.e)",
             "Campos de cada posición (v2)", "Shares en la blockchain (CTF)",
             "Mercado (CLOB /markets/{condition_id})", "Libro de órdenes (CLOB /book)",
-            "Detección de mercado resuelto (código del bot)",
+            "Detección de mercado resuelto (código del bot)", "Resolución en la blockchain (CTF)",
+            "Simulación de extremo a extremo",
         ]:
             self.assertEqual(s.get(check), "OK", (check, report.rows))
         self.assertTrue(any(name.startswith("RPC ") and status == "OK" for name, status, _ in report.rows))
@@ -142,6 +153,12 @@ class TestDiagnoseApi(unittest.TestCase):
         self.assertEqual(s["Operaciones recientes (/v2/trades)"], "WARN")
         self.assertEqual(s["Elegir trader activo"], "INFO")
         self.assertFalse(report.failed, report.rows)
+
+    def test_resolution_found_on_chain_when_clob_lags(self):
+        report = self.run_diagnosis(FakePolymarket(clob_lagging=True), address=WALLET)
+        row = [r for r in report.rows if r[0] == "Detección de mercado resuelto (código del bot)"][0]
+        self.assertEqual(row[1], "OK", row)
+        self.assertIn("blockchain", row[2])
 
     def test_detects_api_ignoring_cursor(self):
         report = self.run_diagnosis(FakePolymarket(ignore_cursor=True), address=WALLET)

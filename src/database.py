@@ -111,7 +111,8 @@ class DatabaseManager:
                 is_active = 1 if item.get("is_active", True) else 0
 
                 existing = conn.execute(
-                    "SELECT initial_bank, available_cash FROM tracked_traders WHERE proxy_address = ?",
+                    "SELECT alias, initial_bank, available_cash, max_drawdown_pct, is_active "
+                    "FROM tracked_traders WHERE proxy_address = ?",
                     (address,)
                 ).fetchone()
 
@@ -124,6 +125,11 @@ class DatabaseManager:
                 else:
                     diff = bank - existing["initial_bank"]
                     new_available = max(0.0, existing["available_cash"] + diff)
+                    # Solo escribir si algo cambia: reescribir los mismos valores modifica el
+                    # archivo y, en GitHub Actions, provoca un commit de estado en cada ejecución.
+                    if (existing["alias"], existing["initial_bank"], existing["available_cash"],
+                            existing["max_drawdown_pct"], existing["is_active"]) == (alias, bank, new_available, max_dd, is_active):
+                        continue
                     conn.execute("""
                         UPDATE tracked_traders
                         SET alias = ?, initial_bank = ?, available_cash = ?, max_drawdown_pct = ?, is_active = ?
@@ -137,7 +143,7 @@ class DatabaseManager:
                 listed,
             ).fetchall()
             conn.execute(
-                f"UPDATE tracked_traders SET is_active = 0 WHERE proxy_address NOT IN ({placeholders})",
+                f"UPDATE tracked_traders SET is_active = 0 WHERE is_active = 1 AND proxy_address NOT IN ({placeholders})",
                 listed,
             )
             conn.commit()
@@ -173,9 +179,9 @@ class DatabaseManager:
         with self._get_conn() as conn:
             conn.execute("""
                 UPDATE tracked_traders
-                SET last_seen_timestamp = MAX(last_seen_timestamp, ?)
-                WHERE proxy_address = ?
-            """, (int(timestamp_sec), address.lower().strip()))
+                SET last_seen_timestamp = ?
+                WHERE proxy_address = ? AND last_seen_timestamp < ?
+            """, (int(timestamp_sec), address.lower().strip(), int(timestamp_sec)))
             conn.commit()
 
     def set_trader_active(self, alias: str, is_active: bool):

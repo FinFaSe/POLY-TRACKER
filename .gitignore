@@ -8,6 +8,10 @@ venv/
 # Claves y configuración local: nunca deben subirse al repositorio
 .env
 .env.*
+!.env.example
+
+# Base de datos del bot cuando corre en un servidor con Docker (no se sube a GitHub)
+data/
 
 # Archivo temporal de cli.py al guardar traders.json
 traders.json.tmp

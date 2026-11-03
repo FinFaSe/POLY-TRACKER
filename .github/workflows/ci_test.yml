@@ -28,3 +28,36 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           pytest -v
+
+  docker:
+    # Comprueba que la imagen para ejecutar el bot en un servidor se construye, no incluye
+    # claves ni estado, arranca en modo continuo y se detiene de forma ordenada con SIGTERM.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v5
+
+      - name: Construir la imagen
+        run: |
+          echo "SECRETO_DE_PRUEBA=no-debe-entrar-en-la-imagen" > .env
+          docker build -t polymarket-copybot .
+
+      - name: La imagen no contiene .env ni la carpeta state
+        run: docker run --rm --entrypoint sh polymarket-copybot -c 'test ! -e /app/.env && test ! -e /app/state'
+
+      - name: docker-compose.yml es válido
+        run: docker compose config -q
+
+      - name: Arranca en modo continuo y se detiene ordenadamente
+        run: |
+          mkdir -p data
+          docker run -d --name bot -e DRY_RUN=true -e POLL_INTERVAL_SECONDS=1 \
+            -e TRADERS_JSON_PATH=/app/config/traders.json \
+            -v "$PWD/data:/app/data" -v "$PWD:/app/config:ro" polymarket-copybot
+          sleep 8
+          test "$(docker inspect -f '{{.State.Running}}' bot)" = "true"
+          docker stop -t 20 bot
+          docker logs bot
+          docker logs bot 2>&1 | grep -q "Bot detenido de forma ordenada"
+          test "$(docker inspect -f '{{.State.ExitCode}}' bot)" = "0"
+          test -f data/copybot.db
