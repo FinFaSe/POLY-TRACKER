@@ -52,6 +52,8 @@ class FakePolymarket:
             return envelope(self.trades[start:start + limit], str(start + limit) if more else None, more)
         if url.endswith("/v2/positions"):
             return envelope(list(self.positions))
+        if url.endswith("/v2/leaderboard"):
+            return envelope([{"rank": 1, "user_id": WALLET, "user_name": "Ballena", "pnl": 1000.0, "volume": 5000.0}])
         if url.endswith("/markets/0xcond"):
             return {"closed": False, "tokens": [{"token_id": "111", "winner": False}, {"token_id": "112", "winner": False}]}
         if url.endswith("/markets/0xres"):
@@ -126,7 +128,7 @@ class TestDiagnoseApi(unittest.TestCase):
             "Campos de cada posición (v2)", "Shares en la blockchain (CTF)",
             "Mercado (CLOB /markets/{condition_id})", "Libro de órdenes (CLOB /book)",
             "Detección de mercado resuelto (código del bot)", "Resolución en la blockchain (CTF)",
-            "Simulación de extremo a extremo",
+            "Simulación de extremo a extremo", "Ranking (/v2/leaderboard)",
         ]:
             self.assertEqual(s.get(check), "OK", (check, report.rows))
         self.assertTrue(any(name.startswith("RPC ") and status == "OK" for name, status, _ in report.rows))

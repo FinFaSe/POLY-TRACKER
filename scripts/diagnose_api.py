@@ -385,6 +385,25 @@ async def check_end_to_end(session, address: str, report: Report, minutes: int =
                    f"${copied:.2f} en compras simuladas, {positions} posiciones, ${cash:.2f} de efectivo")
 
 
+async def check_leaderboard(api, session, report: Report):
+    """El ranking que usa 'cli.py top-traders' responde y trae direcciones de cartera."""
+    from src.top_traders import parse_leaderboard_row
+    try:
+        rows = await api.get_leaderboard(session, "MONTH", "PNL", 5)
+    except Exception as e:
+        status, body = await raw_get(session, f"{api.cfg.data_api_host}/v2/leaderboard",
+                                     {"timePeriod": "MONTH", "orderBy": "PNL", "limit": "5"})
+        report.add("Ranking (/v2/leaderboard)", "FAIL", f"{e} — HTTP {status}: {str(body)[:200]}")
+        return
+    parsed = [t for t in (parse_leaderboard_row(r, i) for i, r in enumerate(rows, 1)) if t]
+    if not parsed:
+        report.add("Ranking (/v2/leaderboard)", "FAIL",
+                   f"sin traders reconocibles (campos recibidos: {', '.join(sorted(rows[0])) if rows else 'ninguno'})")
+        return
+    top = parsed[0]
+    report.add("Ranking (/v2/leaderboard)", "OK", f"{len(parsed)} traders; 1.º {top.name} ({top.address[:10]}…), ganancias ${top.pnl:,.0f}")
+
+
 async def run(address: str) -> Report:
     report = Report()
     cfg = BotConfig(dry_run=True)  # Nunca inicializa el cliente de órdenes.
@@ -411,6 +430,7 @@ async def run(address: str) -> Report:
             ("shares en la blockchain", lambda: check_onchain_shares(api, session, address, report)),
             ("mercados", lambda: check_markets(api, session, address, report, last_trades)),
             ("simulación", lambda: check_end_to_end(session, address, report)),
+            ("ranking", lambda: check_leaderboard(api, session, report)),
         ]:
             try:
                 await check()
