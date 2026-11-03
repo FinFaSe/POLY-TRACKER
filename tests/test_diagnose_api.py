@@ -129,6 +129,7 @@ class TestDiagnoseApi(unittest.TestCase):
             "Mercado (CLOB /markets/{condition_id})", "Libro de órdenes (CLOB /book)",
             "Detección de mercado resuelto (código del bot)", "Resolución en la blockchain (CTF)",
             "Simulación de extremo a extremo", "Ranking (/v2/leaderboard)",
+            "Operaciones de un mercado (/v2/trades)",
         ]:
             self.assertEqual(s.get(check), "OK", (check, report.rows))
         self.assertTrue(any(name.startswith("RPC ") and status == "OK" for name, status, _ in report.rows))

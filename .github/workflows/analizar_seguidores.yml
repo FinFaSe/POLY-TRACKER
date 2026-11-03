@@ -1,0 +1,55 @@
+name: Analizar seguidores de un trader
+
+# Comprueba si las carteras que copian a un trader le "empujan" el precio: seguidores
+# recurrentes, su volumen, cómo se mueve el precio tras sus operaciones y si vende
+# mientras ellos compran. El informe aparece en el resumen de la ejecución.
+# Solo lee datos públicos: no usa claves ni modifica el repositorio.
+on:
+  workflow_dispatch:
+    inputs:
+      direccion:
+        description: "Dirección del trader (0x...)"
+        required: true
+      dias:
+        description: "Días hacia atrás que se revisan"
+        required: false
+        default: "7"
+      ventana_minutos:
+        description: "Minutos antes y después de cada operación"
+        required: false
+        default: "10"
+      max_operaciones:
+        description: "Operaciones más recientes que se analizan (máx. 500)"
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+
+jobs:
+  analizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v5
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Analizar
+        shell: bash
+        env:
+          DIRECCION: ${{ github.event.inputs.direccion }}
+          DIAS: ${{ github.event.inputs.dias }}
+          VENTANA: ${{ github.event.inputs.ventana_minutos }}
+          MAX_OPERACIONES: ${{ github.event.inputs.max_operaciones }}
+        run: |
+          python cli.py analizar-seguidores --address "$DIRECCION" --dias "$DIAS" --ventana "$VENTANA" \
+            --max-operaciones "$MAX_OPERACIONES" --markdown | tee -a "$GITHUB_STEP_SUMMARY"

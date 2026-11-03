@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import sys
 from config import config
-from src import top_traders, traders_file
+from src import follower_analysis, top_traders, traders_file
 from src.database import DatabaseManager
 
 try:
@@ -46,9 +46,19 @@ def main():
                             f"{top_traders.COPYABLE_SCAN} primeros del ranking (los bots se incluyen, marcados con ⚠️)")
     top_p.add_argument("--markdown", action="store_true", help="Salida en Markdown (la usa el workflow de GitHub Actions)")
 
+    fol_p = subparsers.add_parser("analizar-seguidores",
+                                  help="Comprueba si a un trader le 'empujan' el precio otras carteras que le copian")
+    fol_p.add_argument("--address", required=True, help="Dirección proxy del trader (0x...)")
+    fol_p.add_argument("--dias", type=int, default=7, help="Días hacia atrás que se revisan (por defecto 7)")
+    fol_p.add_argument("--ventana", type=int, default=10, help="Minutos antes y después de cada operación (por defecto 10)")
+    fol_p.add_argument("--max-operaciones", type=int, default=60, help="Operaciones más recientes que se analizan (por defecto 60)")
+    fol_p.add_argument("--markdown", action="store_true", help="Salida en Markdown (la usa el workflow de GitHub Actions)")
+
     args = parser.parse_args()
     if args.command == "top-traders":
         sys.exit(run_top_traders(args))
+    if args.command == "analizar-seguidores":
+        sys.exit(run_follower_analysis(args))
     db = DatabaseManager(config.db_path)
     path = config.traders_json_path
 
@@ -181,6 +191,45 @@ def run_top_traders(args) -> int:
             print(" | ".join(row))
     for note in top_traders.NOTES:
         print(f"- {note}")
+    return 0
+
+
+def run_follower_analysis(args) -> int:
+    """Análisis de solo lectura: no usa la base de datos ni claves."""
+    from src.polymarket_api import PolymarketClientWrapper
+    try:
+        import aiohttp
+    except ImportError:
+        aiohttp = None
+
+    address = args.address.strip().lower()
+    if not (address.startswith("0x") and len(address) == 42):
+        print("✘ La dirección debe tener el formato 0x seguido de 40 caracteres.", file=sys.stderr)
+        return 1
+
+    async def run():
+        api = PolymarketClientWrapper(config)
+        session = aiohttp.ClientSession() if aiohttp is not None else None
+        try:
+            return await follower_analysis.analyze_followers(
+                api, session, address, days=max(1, args.dias), window_minutes=max(1, args.ventana),
+                max_trades=max(1, min(500, args.max_operaciones)),
+            )
+        finally:
+            if session is not None:
+                await session.close()
+
+    try:
+        report = asyncio.run(run())
+    except Exception as e:
+        print(f"✘ No se pudo completar el análisis: {e}", file=sys.stderr)
+        return 1
+    text = follower_analysis.render_markdown(report)
+    if args.markdown or not console:
+        print(text, end="")
+    else:
+        from rich.markdown import Markdown
+        console.print(Markdown(text))
     return 0
 
 
