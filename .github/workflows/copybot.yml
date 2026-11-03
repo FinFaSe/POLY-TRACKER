@@ -16,10 +16,11 @@ on:
         required: false
         default: "10"
 
-  # Ejecución automática desactivada temporalmente (solo se lanza a mano).
-  # Para reactivarla, descomenta estas dos líneas:
-  # schedule:
-  #   - cron: "*/5 * * * *"
+  # Cada 5 minutos (GitHub puede retrasarlo). Opera en simulación mientras la variable
+  # DRY_RUN del repositorio no sea "false". Para pausarlo, comenta estas dos líneas o crea
+  # la variable BOT_RUNS_ON_SERVER=true si el bot pasa a correr en un servidor.
+  schedule:
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
